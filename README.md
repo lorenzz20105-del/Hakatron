@@ -9,8 +9,8 @@ userland on the phone — plus **Devos**, the trained layer that reads a project
 works out how it is built, runs the build, and fixes what the compiler actually
 says. No mock runners, no fake progress bars.
 
-**Latest release: [0.13.0](https://github.com/lorenzz20105-del/Hakatron/releases/latest)** —
-`Hakatron-0.13.0-release.apk` · 29.8 MB · universal (`arm64-v8a`, `armeabi-v7a`,
+**Latest release: [0.14.0](https://github.com/lorenzz20105-del/Hakatron/releases/latest)** —
+`Hakatron-0.14.0-release.apk` · 29.9 MB · universal (`arm64-v8a`, `armeabi-v7a`,
 `x86`, `x86_64`) · Android 7.0+ · signed with the same key since 0.1.0, upgrades in place.
 
 ```
@@ -46,7 +46,21 @@ with predictions and honest warnings before a single command runs.
   `CMakeLists.txt`). It never rewrites your source.
 - Unbuildable stacks are refused honestly instead of faking success.
 
-### Terminal & engines
+### Terminal — real, and standalone
+- **A real pty.** The shell runs under `script(1)` inside the guest, so it has a
+  pseudo-terminal: `isatty` is true, job control and `stty` work, and `vi`, `top`,
+  `less` and interactive Python all run. `script` is bundled in the rootfs — no
+  network, nothing outside the app.
+- **A real VT-100/xterm emulator** written for this project (~470 lines, no
+  library): 80×24 grid + 3,000 lines of scrollback, 16/256/24-bit SGR colour,
+  cursor addressing, scroll regions, alternate screen, OSC title, DSR/CPR replies,
+  UTF-8 that survives being split across reads.
+- **Keystrokes, not lines** — every character goes to the pty as typed, with a
+  sticky `CTRL` and extra-key row for `ESC TAB ^C ^D` arrows and the symbols a
+  phone keyboard hides. One process per session, so `cd` / `export` / `apk add`
+  all persist.
+
+### Engines
 - **Built-in engine** — PRoot + Alpine, ships in the APK. Standalone: no daemon,
   no Termux, no root.
 - **Termux bridge** (optional) — builds inside an existing Termux install and tees
@@ -63,13 +77,13 @@ with predictions and honest warnings before a single command runs.
 ## Testing
 
 ```bash
-./gradlew :app:testReleaseUnitTest      # 42 tests, no emulator
+./gradlew :app:testReleaseUnitTest      # 60 tests, no emulator
 ./gradlew :app:assembleDebug            # debug APK
 ./gradlew :app:assembleRelease          # signed if app/keystore/devstudio.jks exists
 ```
 
-The reasoning layer is pure Kotlin, so `Analyzer`, `Planner`, `KnowledgeBase` and
-`TreeReader` are covered by JVM tests: every rule is asserted against a real error
+The reasoning layer and the terminal emulator are pure Kotlin, so `Analyzer`,
+`Planner`, `KnowledgeBase`, `TreeReader` and `VtScreen` are covered by JVM tests: every rule is asserted against a real error
 line, and the honesty rules are asserted too — `docker` is refused, a syntax error
 never runs a command, unrecognised output returns *no* fix, and a wrapped line in
 a screenshot can never shift the tree levels below it.
@@ -82,6 +96,7 @@ CI, and the pipeline still verifies the whole app compiles and packages.
 
 | version | what landed |
 |---|---|
+| 0.14.0 | **real terminal**: bundled `script(1)` gives the shell a pty, plus a VT-100/xterm emulator (colours, cursor addressing, alt-screen, 18 new tests) — 60 tests total |
 | 0.13.0 | 42 unit tests + GitHub Actions CI; **universal APK** (0.12.0's arm64-only build was refused on 32-bit phones); service fixes chosen by port; empty `requirements.txt` no longer hides imports |
 | 0.12.0 | read a whole project tree out of a screenshot (on-device OCR, tiled decoding, brace expansion, rank-based indentation) |
 | 0.11.0 | Termux build-log card |

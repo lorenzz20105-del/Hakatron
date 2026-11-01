@@ -256,6 +256,80 @@ object Engine {
         }
     }
 
+    // ---------------------------------------------------- interactive session
+    /** How the last [sessionProcess] call attached the shell: "pty" or "pipe". */
+    @Volatile var lastSessionMode: String = "pipe"; private set
+
+    /**
+     * Starts an INTERACTIVE shell for the terminal screen.
+     *
+     * `script(1)` is bundled inside the Alpine rootfs (67 KB, musl only), so the
+     * shell can be given a REAL pseudo-terminal: job control, `isatty`, prompts,
+     * `vi`, `top` and `less` behave as they do in Termux — with nothing outside
+     * the app. When that binary is missing we fall back to piped stdio and say so.
+     */
+    fun sessionProcess(ctx: Context, cols: Int, rows: Int, preferPty: Boolean = true): Process? {
+        if (!isReady(ctx)) return null
+        val lib = ctx.applicationInfo.nativeLibraryDir
+        val root = rootfs(ctx).absolutePath
+        File(baseDir(ctx), "tmp").mkdirs()
+
+        fun base(guestArgv: List<String>): List<String> = listOf(
+            "$lib/libldlinux.so", "--library-path", lib, "$lib/libproot.so",
+            "-0", "-r", root,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/dev/pts",
+            "-b", File(baseDir(ctx), "shared").apply { mkdirs() }.absolutePath + ":/root/shared",
+            "-b", "/sdcard", "-w", "/root"
+        ) + guestArgv
+
+        val env = HashMap(prootEnv(ctx))
+        env["TERM"] = "xterm-256color"
+        env["LINES"] = rows.toString()
+        env["COLUMNS"] = cols.toString()
+        // an interactive ash picks PS1 up from the environment: a coloured prompt
+        // without having to type `export PS1=…` into the user's session
+        env["PS1"] = "\u001b[1;36mhakatron\u001b[0m:\\w\\$ "
+        env["ENV"] = "/root/.hakatron_init"
+
+        val pty = preferPty && hasScript(ctx)
+        val argv = if (pty) {
+            // -q quiet, -e return the child's exit status, -f flush after every write
+            base(listOf("/bin/script", "-q", "-e", "-f", "-c", "sh -i", "/dev/null"))
+        } else {
+            base(listOf("/bin/sh", "-i"))
+        }
+        return try {
+            val pb = ProcessBuilder(argv).redirectErrorStream(true)
+            pb.environment().putAll(env)
+            val p = pb.start()
+            lastSessionMode = if (pty) "pty" else "pipe"
+            // first-run shell conveniences, sourced only if it exists
+            runCatching {
+                val init = File(rootfs(ctx), "root/.hakatron_init")
+                if (!init.exists()) init.writeText(
+                    "# Hakatron terminal init\n" +
+                        "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n" +
+                        "export PS1='\\033[1;36mhakatron\\033[0m:\\w\\$ '\n" +
+                        "alias ll='ls -la'\n" +
+                        "echo -e '\\033[2mHakatron terminal — Alpine Linux, PRoot, on-device.'\n" +
+                        "echo -e '\\033[2mTry: apk add python3  ·  vi /root/notes.txt  ·  exit\\033[0m'\n"
+                )
+            }
+            p
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Is `script(1)` inside the guest? Probed once and remembered. */
+    @Volatile private var scriptSeen: Boolean? = null
+    fun hasScript(ctx: Context): Boolean {
+        scriptSeen?.let { return it }
+        val found = exec(ctx, "command -v script >/dev/null 2>&1 && echo YES || echo NO", 30_000).contains("YES")
+        scriptSeen = found
+        return found
+    }
+
     /** Sends one command to a live shell and waits (bounded) for its output. */
     fun runIn(shell: Process?, cmd: String, waitMs: Long = 8_000): String {
         if (shell == null || !shell.isAlive) return "shell not running"

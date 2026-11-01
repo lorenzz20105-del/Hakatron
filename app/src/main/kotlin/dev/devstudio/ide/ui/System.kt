@@ -81,7 +81,7 @@ fun SystemScreen(ready: Boolean, busy: Boolean, log: String,
                 Text("System", color = Txt, fontSize = 20.sp, fontWeight = FontWeight.Black)
                 Text("Engine, toolchain, storage, Termux", color = Dim, fontSize = 11.sp)
             }
-            Text("Hakatron 0.13", color = Dim, fontSize = 10.sp)
+            Text("Hakatron 0.14", color = Dim, fontSize = 10.sp)
         }
         Spacer(Modifier.height(12.dp))
 
