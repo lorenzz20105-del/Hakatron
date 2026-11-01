@@ -1,0 +1,170 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""linuxdeskd - the LinuxDesk control daemon for Termux.
+
+The daemon listens on a loopback TCP port (127.0.0.1:7801 by default) and
+exposes the `linuxdesk` command line over a tiny JSON line protocol. The
+Android app talks to it directly, which means the app can start, stop and
+inspect desktop sessions without going through Termux for every call.
+
+Protocol
+--------
+Request:  one JSON object per line, e.g. {"cmd": "status"}
+Response: one JSON object per line, e.g. {"ok": true, "output": "..."}
+"""
+
+import json
+import os
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+
+HOST = os.environ.get("LINUXDESKD_HOST", "127.0.0.1")
+PORT = int(os.environ.get("LINUXDESKD_PORT", "7801"))
+CLI = os.environ.get("LINUXDESK_CLI", os.path.join(os.path.dirname(os.path.abspath(__file__)), "linuxdesk"))
+TIMEOUT = int(os.environ.get("LINUXDESKD_TIMEOUT", "600"))
+
+log_lock = threading.Lock()
+
+
+def log(message):
+    with log_lock:
+        sys.stderr.write("[linuxdeskd] %s\n" % message)
+        sys.stderr.flush()
+
+
+def run_cli(args, timeout=TIMEOUT):
+    """Runs the linuxdesk CLI and returns a dictionary with the result."""
+    try:
+        proc = subprocess.run(
+            [CLI] + args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "exit": proc.returncode,
+            "output": proc.stdout.decode("utf-8", "replace"),
+            "error": proc.stderr.decode("utf-8", "replace"),
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "exit": -1, "output": "", "error": "timeout"}
+    except OSError as exc:
+        return {"ok": False, "exit": -1, "output": "", "error": str(exc)}
+
+
+# The app and the command line speak slightly different names, the daemon
+# understands both of them.
+ALIASES = {
+    "session-start": "start",
+    "session-stop": "stop",
+    "session-list": "status",
+    "session-logs": "logs",
+    "session-exec": "exec",
+    "session-resize": "resize",
+    "list-sessions": "status",
+    "sessions": "status",
+}
+
+
+class Handler(socketserver.StreamRequestHandler):
+    timeout = 900
+
+    def handle(self):
+        for raw in self.rfile:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                request = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                self.reply({"ok": False, "error": "malformed request"})
+                continue
+            response = self.dispatch(request)
+            self.reply(response)
+
+    def reply(self, payload):
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        self.wfile.write(data)
+        self.wfile.flush()
+
+    def dispatch(self, request):
+        cmd = request.get("cmd", "")
+        args = request.get("args", [])
+        if not isinstance(args, list):
+            args = [str(args)]
+        args = [str(a) for a in args]
+
+        cmd = ALIASES.get(cmd, cmd)
+        if cmd == "ping":
+            return {"ok": True, "pong": True, "version": VERSION}
+        if cmd == "quit":
+            self.reply({"ok": True})
+            threading.Thread(target=shutdown, daemon=True).start()
+            return {"ok": True}
+        if cmd == "status":
+            result = run_cli(["session", "list"])
+            result["sessions"] = result.get("output", "").strip().splitlines()[1:]
+            return result
+        if cmd == "session-status":
+            return run_cli(["session", "status"] + args)
+        if cmd == "start":
+            return run_cli(["session", "start"] + args)
+        if cmd == "stop":
+            return run_cli(["session", "stop"] + args)
+        if cmd == "resize":
+            return run_cli(["session", "resize"] + args)
+        if cmd == "exec":
+            return run_cli(["session", "exec"] + args)
+        if cmd == "logs":
+            return run_cli(["session", "logs"] + args)
+        if cmd == "app-run":
+            return run_cli(["run"] + args)
+        if cmd == "app-install":
+            return run_cli(["app", "install"] + args)
+        if cmd == "desktop-install":
+            return run_cli(["desktop", "install"] + args)
+        if cmd == "desktop-list":
+            return run_cli(["desktop", "list"])
+        if cmd == "distro-list":
+            return run_cli(["distro", "list"])
+        if cmd == "distro-install":
+            return run_cli(["distro", "install"] + args)
+        if cmd == "bootstrap":
+            return run_cli(["bootstrap"] + args)
+        if cmd == "selftest":
+            return run_cli(["selftest"])
+        if cmd == "raw":
+            return run_cli(args)
+        return {"ok": False, "error": "unknown command: %s" % cmd}
+
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+VERSION = "1.0.0"
+
+
+def shutdown():
+    server.shutdown()
+
+
+def main():
+    global server
+    server = Server((HOST, PORT), Handler)
+    log("listening on %s:%d" % (HOST, PORT))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        log("stopped")
+
+
+if __name__ == "__main__":
+    main()

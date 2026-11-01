@@ -1,0 +1,372 @@
+package dev.devstudio.ide.ui
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import dev.devstudio.ide.core.TreeOcr
+import dev.devstudio.ide.Engine
+import dev.devstudio.ide.core.Planner
+import dev.devstudio.ide.termux.TermuxBridge
+import dev.devstudio.ide.core.Store
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+@Composable
+fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {},
+                onClose: () -> Unit = {}) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var structure by remember { mutableStateOf("") }
+    var parts by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
+    var plan by remember { mutableStateOf<Planner.Plan?>(null) }
+    var log by remember { mutableStateOf<List<Planner.LogLine>>(emptyList()) }
+    var running by remember { mutableStateOf(false) }
+    var setupText by remember { mutableStateOf("") }
+    var result by remember { mutableStateOf<Planner.Result?>(null) }
+    var useTermux by remember { mutableStateOf(false) }
+    var tlog by remember { mutableStateOf<String?>(null) }
+    var ocrNote by remember { mutableStateOf<String?>(null) }
+    var ocrBusy by remember { mutableStateOf(false) }
+    var ocrProg by remember { mutableStateOf("") }
+    val verdict = remember { TermuxBridge.verdict(ctx) }
+    val store = remember { Store(ctx) }
+
+    val planner = remember { Planner { cmd -> Engine.exec(ctx, cmd, 300_000) } }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        ocrBusy = true
+        ocrProg = ""
+        ocrNote = null
+        TreeOcr.read(ctx, uri, onProgress = { p -> ocrProg = "strip ${p.done}/${p.total}" }) { res, err ->
+            ocrBusy = false
+            ocrProg = ""
+            if (res != null && res.ok) {
+                structure = res.structure
+                ocrNote = "read ${res.entries} entries" + (res.root?.let { " under $it" } ?: "") +
+                    " — check the tree, then paste the code"
+            } else {
+                ocrNote = err ?: "could not read that image"
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Build Studio", color = Txt, fontSize = 20.sp, fontWeight = FontWeight.Black)
+                Text("1 structure · 2 parts · 3 notes · then build", color = Dim, fontSize = 11.sp)
+            }
+            Text("Close", color = Cyan, fontSize = 11.sp, modifier = Modifier.clickable { onClose() })
+        }
+        Spacer(Modifier.height(12.dp))
+
+        if (!ready) {
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2A1A14)),
+                shape = RoundedCornerShape(14.dp)) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("Engine not set up yet", color = Amber, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                    Text("Build Studio runs real commands — set up the built-in Alpine Linux first " +
+                        "(System tab, ~1 minute, no Termux needed).", color = Color(0xFFE8D6C8), fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
+        SectionLabel("FROM A SCREENSHOT")
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = RoundedCornerShape(11.dp), color = Surf,
+                border = BorderStroke(1.dp, if (ocrBusy) Violet else LineC),
+                modifier = Modifier.clickable(enabled = !ocrBusy) { picker.launch("image/*") }) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (ocrBusy) "◌" else "▣", color = Cyan, fontSize = 13.sp)
+                    Spacer(Modifier.width(7.dp))
+                    Text(if (ocrBusy) "reading the image… $ocrProg" else "Read a project tree from a picture",
+                        color = Txt, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Text(ocrNote ?: "Paste a screenshot of a tree (├── └── │) — OCR runs on the phone, " +
+            "nothing is uploaded, and the depth comes from the pixels, not the glyphs.",
+            color = if (ocrNote?.contains("could not") == true || ocrNote?.contains("no project") == true)
+                Amber else Dim, fontSize = 10.sp, lineHeight = 14.sp,
+            modifier = Modifier.padding(top = 6.dp))
+
+        SectionLabel("0 · START FROM A TEMPLATE")
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Templates.all.forEach { tpl ->
+                Surface(shape = RoundedCornerShape(11.dp), color = Surf,
+                    border = BorderStroke(1.dp, LineC),
+                    modifier = Modifier.clickable {
+                        structure = tpl.structure.trim('\n')
+                        parts = tpl.parts.trim('\n')
+                        notes = tpl.notes.trim('\n')
+                        log = emptyList(); result = null
+                    }) {
+                    Column(Modifier.padding(horizontal = 11.dp, vertical = 7.dp)) {
+                        Text(tpl.name, color = tpl.accent, fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold)
+                        Text(tpl.tag, color = Dim, fontSize = 9.sp)
+                    }
+                }
+            }
+        }
+        Text("or paste your own — structure first, then the files.",
+            color = Dim, fontSize = 10.sp, modifier = Modifier.padding(top = 6.dp))
+
+        SectionLabel("1 · PROJECT STRUCTURE")
+        PasteField(structure, { structure = it }, 6,
+            "myapp/\n├── app.py\n├── requirements.txt\n└── templates/index.html")
+
+        SectionLabel("2 · THE PARTS")
+        PasteField(parts, { parts = it }, 8,
+            "=== app.py ===\nfrom flask import Flask\n...\n=== requirements.txt ===\nflask==3.0.0")
+        Text("Paste file by file, or the whole project with === path === headers.",
+            color = Dim, fontSize = 10.sp)
+
+        SectionLabel("3 · BUILD NOTES (optional but powerful)")
+        PasteField(notes, { notes = it }, 6,
+            "Tools needed first: gcc, make\nBefore building: mkdir -p build\nBuild: make\nRun: ./app")
+
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            listOf("Built-in Linux" to false, "Termux" to true).forEach { (label, isT) ->
+                val on = useTermux == isT
+                Surface(shape = RoundedCornerShape(10.dp),
+                    color = if (on) Color(0xFF221A3F) else Surf,
+                    border = BorderStroke(1.dp, if (on) Violet else LineC),
+                    modifier = Modifier.clickable { useTermux = isT }) {
+                    Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Text(label, color = if (on) Color(0xFFC4B5FD) else Dim, fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold)
+                        Text(if (isT) (if (verdict.genuine) "genuine ${verdict.version}" else "not ready")
+                             else "self-fixing builds",
+                            color = Dim, fontSize = 9.sp)
+                    }
+                }
+            }
+        }
+        if (useTermux) {
+            Spacer(Modifier.height(8.dp))
+            Surface(shape = RoundedCornerShape(11.dp), color = Surf,
+                border = BorderStroke(1.dp, LineC),
+                modifier = Modifier.fillMaxWidth().clickable {
+                    tlog = SharedFiles.buildLog() ?: "no log yet — send a build first"
+                }) {
+                Column(Modifier.padding(10.dp)) {
+                    Text("READ TERMUX LOG", color = Dim, fontSize = 9.sp, letterSpacing = 1.1.sp)
+                    Text("Tail of the last build Termux ran in the shared folder", color = Txt,
+                        fontSize = 11.sp)
+                }
+            }
+            tlog?.let { Text(it.takeLast(2500), color = Color(0xFF9FB2C9), fontSize = 9.5.sp,
+                fontFamily = FontFamily.Monospace, lineHeight = 13.sp) }
+        }
+        if (useTermux && !verdict.genuine) {
+            Text("Termux engine needs genuine Termux (F-Droid/GitHub). Home → Termux for setup.",
+                color = Amber, fontSize = 10.sp)
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = {
+            plan = planner.plan("project", structure, parts, notes)
+            log = emptyList()
+        }, enabled = structure.isNotBlank() || parts.isNotBlank(), modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Cyan)) {
+            Text("Analyze", color = Color(0xFF04222A), fontWeight = FontWeight.Black)
+        }
+
+        plan?.let { p ->
+            Spacer(Modifier.height(14.dp))
+            PlanCard(p)
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = {
+                running = true
+                log = emptyList()
+                scope.launch {
+                    if (useTermux) {
+                        val script = TermuxBridge.scriptFor(p.name,
+                            p.steps.map { it.cmd })
+                        val sent = TermuxBridge.send(ctx, script, true)
+                        result = null
+                        log = listOf(
+                            Planner.LogLine("cmd", "Termux engine · ${p.steps.size} step(s)"),
+                            Planner.LogLine(if (sent) "ok" else "err",
+                                if (sent) "script sent to Termux — watch it there"
+                                else "Termux refused the intent: open Termux, allow external apps, retry"),
+                            Planner.LogLine("stop", "Termux writes the log to " + SharedFiles.DIR +
+                                "/last-build.log — tap Read Termux log below."),
+                            Planner.LogLine("stop", "Steps sent: ${p.steps.joinToString(" | ") { it.cmd }.take(400)}")
+                        )
+                        running = false
+                        return@launch
+                    }
+                    val res = withContext(Dispatchers.IO) {
+                        planner.build(p, store.memory(),
+                            onLearn = { k, v -> store.rememberFix(k, v) })
+                    }
+                    result = res
+                    log = res.log
+                    running = false
+                    store.saveRecipe(p.name, p.stack, p.steps.map { "${it.kind}|${it.cmd}" },
+                        "Saved from Build Studio")
+                }
+            }, enabled = !running && ready, modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Green)) {
+                Text(if (running) "Building…" else "Build it", color = Color(0xFF06281C),
+                    fontWeight = FontWeight.Black)
+            }
+        }
+
+        result?.let { r ->
+            if (r.ok || r.port != null) {
+                Spacer(Modifier.height(10.dp))
+                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2B22)),
+                    shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(if (r.ok) "Build finished" else "Stopped, but a server may be up",
+                            color = Color(0xFF7BF3BE), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("${r.fixes} fix(es) applied · " +
+                            (r.port?.let { "port $it" } ?: "no port"), color = Color(0xFFA9C7C0), fontSize = 10.5.sp)
+                        // a build is "done" only when every phase the plan has, passed
+                        if (r.phases.isNotEmpty()) {
+                            Spacer(Modifier.height(7.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                r.phases.forEach { (phase, ok) ->
+                                    Surface(shape = RoundedCornerShape(7.dp),
+                                        color = if (ok) Color(0xFF12352A) else Color(0xFF3A1E22),
+                                        border = BorderStroke(1.dp,
+                                            if (ok) Color(0xFF2E7D5B) else Color(0xFF7A2E37))) {
+                                        Text((if (ok) "✓ " else "✗ ") + phase,
+                                            color = if (ok) Color(0xFF7BF3BE) else Color(0xFFF8A5A5),
+                                            fontSize = 9.sp,
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
+                                    }
+                                }
+                                if (r.done) Pill("done", Green)
+                            }
+                        }
+                        r.port?.let { p2 ->
+                            Spacer(Modifier.height(8.dp))
+                            Button(onClick = { onPreview("http://127.0.0.1:$p2") },
+                                colors = ButtonDefaults.buttonColors(containerColor = Green)) {
+                                Text("Preview localhost:$p2", color = Color(0xFF06281C), fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (log.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF080A0E)),
+                shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    log.forEach { l ->
+                        val c = when (l.level) {
+                            "cmd" -> Cyan; "ok" -> Green; "err" -> Red
+                            "fix" -> Amber; "stop" -> Amber; "learn" -> Color(0xFF22D3EE)
+                            else -> Dim
+                        }
+                        Text(l.text, color = c, fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace, lineHeight = 15.sp)
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun PlanCard(p: Planner.Plan) {
+    Card(colors = CardDefaults.cardColors(containerColor = Surf), shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp)) {
+            Text("BEST MATCH", color = Color(0xFFB7A4FF), fontSize = 9.sp, letterSpacing = 1.1.sp)
+            Text(p.label, color = Txt, fontSize = 17.sp, fontWeight = FontWeight.Black)
+            Text("${(p.confidence * 100).toInt()}% confident · ${p.files.size} files · " +
+                "runs: ${p.runCmd}", color = Dim, fontSize = 10.5.sp)
+            Spacer(Modifier.height(8.dp))
+            LinearProgressIndicator(progress = { p.confidence.toFloat() },
+                modifier = Modifier.fillMaxWidth().height(6.dp), color = Cyan,
+                trackColor = Color(0xFF000000).copy(alpha = 0.4f))
+            Spacer(Modifier.height(10.dp))
+            p.evidence.take(5).forEach { (pts, why) ->
+                Text("+$pts  $why", color = Color(0xFFC6CBD9), fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace)
+            }
+            if (p.predictions.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text("PREDICTED", color = Dim, fontSize = 9.sp, letterSpacing = 1.1.sp)
+                p.predictions.take(4).forEach { pr ->
+                    val c = if (pr.sev == "high") Red else if (pr.sev == "medium") Amber else Cyan
+                    Text("${pr.where}: ${pr.what}", color = c, fontSize = 10.sp)
+                }
+            }
+            if (p.issues.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text("REVIEW · ${p.issues.size} issue(s)", color = Dim, fontSize = 9.sp, letterSpacing = 1.1.sp)
+                p.issues.take(4).forEach { i ->
+                    val c = if (i.sev == "high") Red else if (i.sev == "medium") Amber else Dim
+                    Text("${i.file}:${i.line} ${i.msg}", color = c, fontSize = 10.sp)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text("STEPS · ${p.steps.size}", color = Dim, fontSize = 9.sp, letterSpacing = 1.1.sp)
+            p.steps.forEachIndexed { i, s ->
+                Text("${i + 1}. [${s.kind}] ${s.cmd}", color = Color(0xFFCFE1F5), fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace)
+                Text("     ${s.why}", color = Color(0xFF7C8496), fontSize = 9.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Spacer(Modifier.height(14.dp))
+    Text(text, color = Dim, fontSize = 9.5.sp, letterSpacing = 1.1.sp)
+    Spacer(Modifier.height(6.dp))
+}
+
+@Composable
+private fun PasteField(value: String, onChange: (String) -> Unit, lines: Int, hint: String) {
+    OutlinedTextField(
+        value = value, onValueChange = onChange,
+        placeholder = { Text(hint, color = Color(0xFF5C6478), fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace) },
+        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            color = Txt),
+        minLines = lines, maxLines = lines + 6,
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, imeAction = ImeAction.Default),
+        modifier = Modifier.fillMaxWidth(),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = Violet, unfocusedBorderColor = LineC,
+            focusedContainerColor = Color(0xFF0A0C11), unfocusedContainerColor = Color(0xFF0A0C11))
+    )
+}

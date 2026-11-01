@@ -1,0 +1,587 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# linuxdesk - the LinuxDesk engine for Termux.
+#
+# Installs and drives a full Linux desktop inside a proot-distro container
+# and exposes it through a VNC server that the LinuxDesk Android app can
+# display with its built-in viewer.
+#
+# Usage:
+#   linuxdesk bootstrap [--no-sudo]      install everything Termux needs
+#   linuxdesk distro list                 list installed distributions
+#   linuxdesk distro install <name>       install a distribution
+#   linuxdesk distro remove <name>        remove a distribution
+#   linuxdesk session start <name> [opts] start a desktop session
+#   linuxdesk session stop <name>         stop a desktop session
+#   linuxdesk session list                list sessions
+#   linuxdesk session status <name>       session status
+#   linuxdesk session resize <name> WxH   change the framebuffer size
+#   linuxdesk session exec <name> <cmd>   run a command inside the distro
+#   linuxdesk session logs <name>         tail the session log
+#   linuxdesk selftest                    verify the installation
+#   linuxdesk app install [target] <pkg>  install packages in a distribution
+#   linuxdesk desktop install <de> [target]  install a desktop environment
+#
+# All state lives in $PREFIX/var/lib/linuxdesk and $PREFIX/var/log/linuxdesk.
+
+set -uo pipefail
+
+PREFIX="${PREFIX:-$HOME}"
+LIBDIR="$PREFIX/var/lib/linuxdesk"
+LOGDIR="$PREFIX/var/log/linuxdesk"
+RUNDIR="$PREFIX/var/run/linuxdesk"
+CONF="$LIBDIR/config.sh"
+SESSION_DIR="$LIBDIR/sessions"
+
+DEFAULT_DISTRO="ubuntu"
+DEFAULT_GEOMETRY="1280x800"
+DEFAULT_PORT=5901
+DEFAULT_DISPLAY=1
+DEFAULT_DESKTOP="xfce4"
+VNC_SERVER="Xtigervnc"
+
+log()  { printf '[linuxdesk] %s\n' "$*" >&2; }
+warn() { printf '[linuxdesk] WARN: %s\n' "$*" >&2; }
+die()  { printf '[linuxdesk] ERROR: %s\n' "$*" >&2; exit 1; }
+
+need_termux() {
+  [ -d "$PREFIX" ] || die "not running inside Termux"
+}
+
+load_config() {
+  if [ -f "$CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF"
+  fi
+  DISTRO="${DISTRO:-$DEFAULT_DISTRO}"
+  GEOMETRY="${GEOMETRY:-$DEFAULT_GEOMETRY}"
+  VNC_PORT="${VNC_PORT:-$DEFAULT_PORT}"
+  X_DISPLAY_NUM="${X_DISPLAY_NUM:-$DEFAULT_DISPLAY}"
+  DESKTOP="${DESKTOP:-$DEFAULT_DESKTOP}"
+}
+
+save_config() {
+  mkdir -p "$LIBDIR"
+  cat > "$CONF" <<EOF
+# LinuxDesk engine configuration - written by linuxdesk.
+DISTRO="$DISTRO"
+GEOMETRY="$GEOMETRY"
+VNC_PORT="$VNC_PORT"
+X_DISPLAY_NUM="$X_DISPLAY_NUM"
+DESKTOP="$DESKTOP"
+VNC_SERVER="$VNC_SERVER"
+EOF
+}
+
+# ---------------------------------------------------------------- bootstrap
+
+pkg_install() {
+  if command -v pkg >/dev/null 2>&1; then
+    pkg install -y "$@"
+  else
+    die "pkg not found - install Termux from F-Droid first"
+  fi
+}
+
+cmd_bootstrap() {
+  need_termux
+  log "installing Termux packages"
+  # The x11 repository carries Termux:X11 and the Mesa/VNC bits we need.
+  pkg_install x11-repo || warn "x11-repo failed, continuing"
+  pkg_install proot-distro || die "proot-distro is required"
+  pkg_install termux-x11-nightly || warn "termux-x11-nightly failed (the app can use a pure VNC server)"
+  pkg_install python || warn "python failed (needed for linuxdeskd)"
+  pkg_install dbus || warn "dbus failed"
+  pkg_install pulseaudio || warn "pulseaudio failed"
+  pkg_install root-repo || warn "root-repo failed"
+  pkg_install tur-repo || warn "tur-repo failed"
+  pkg_install proot || warn "proot failed"
+
+  mkdir -p "$LIBDIR" "$LOGDIR" "$RUNDIR" "$SESSION_DIR" "$PREFIX/.local/share/linuxdesk"
+  load_config
+  save_config
+  log "bootstrap done"
+  log "next: linuxdesk distro install $DISTRO"
+}
+
+# ----------------------------------------------------------------- distro
+
+cmd_distro() {
+  sub="${1:-list}"; shift || true
+  case "$sub" in
+    list)
+      if command -v proot-distro >/dev/null 2>&1; then
+        proot-distro list 2>/dev/null | sed 's/^/  /'
+      else
+        echo "  (proot-distro is not installed)"
+      fi
+      ;;
+    install)
+      name="${1:-$DEFAULT_DISTRO}"
+      command -v proot-distro >/dev/null 2>&1 || die "proot-distro is not installed"
+      log "installing distribution '$name' (this takes a while)"
+      proot-distro install "$name" || die "failed to install $name"
+      provision_distro "$name"
+      ;;
+    remove)
+      name="${1:?usage: linuxdesk distro remove <name>}"
+      proot-distro remove "$name" || die "failed to remove $name"
+      ;;
+    *)
+      die "unknown: linuxdesk distro $sub"
+      ;;
+  esac
+}
+
+# Installs the X/VNC server inside the distribution.
+provision_distro() {
+  name="$1"
+  log "provisioning '$name' with the X11 and VNC stack"
+  proot-distro login "$name" -- bash -lc '
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y --no-install-recommends \
+      tigervnc-standalone-server tigervnc-common x11vnc \
+      x11-xserver-utils xkb-data xserver-common \
+      xterm x11-utils dbus-x11
+    # The default desktop, so the first start works out of the box.
+    apt-get install -y --no-install-recommends xfce4 xfce4-goodies xterm || true
+  ' 2>&1 | tail -20
+  log "provisioning finished"
+}
+
+# ---------------------------------------------------------------- session
+
+session_dir() { echo "$SESSION_DIR/$1"; }
+
+cmd_session() {
+  sub="${1:-list}"; shift || true
+  case "$sub" in
+    list)   cmd_session_list ;;
+    start)  cmd_session_start "$@" ;;
+    stop)   cmd_session_stop "$@" ;;
+    status) cmd_session_status "$@" ;;
+    resize) cmd_session_resize "$@" ;;
+    exec)   cmd_session_exec "$@" ;;
+    logs)   cmd_session_logs "$@" ;;
+    *) die "unknown: linuxdesk session $sub" ;;
+  esac
+}
+
+cmd_session_list() {
+  echo "name                 distro     geometry    port   state"
+  if [ -d "$SESSION_DIR" ]; then
+    for d in "$SESSION_DIR"/*; do
+      [ -d "$d" ] || continue
+      name=$(basename "$d")
+      distro=$(cat "$d/distro" 2>/dev/null || echo "-")
+      geom=$(cat "$d/geometry" 2>/dev/null || echo "-")
+      port=$(cat "$d/port" 2>/dev/null || echo "-")
+      if [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then state=running; else state=stopped; fi
+      printf "%-20s %-10s %-11s %-6s %s\n" "$name" "$distro" "$geom" "$port" "$state"
+    done
+  fi
+}
+
+cmd_session_start() {
+  name="${1:?usage: linuxdesk session start <name> [options]}"
+  shift || true
+  local distro="$DISTRO" geometry="$GEOMETRY" port="$VNC_PORT" display="$X_DISPLAY_NUM" desktop="$DESKTOP" server="$VNC_SERVER" mode="vnc"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --distro) distro="$2"; shift 2 ;;
+      --geometry|-g) geometry="$2"; shift 2 ;;
+      --port|-p) port="$2"; shift 2 ;;
+      --display|-d) display="$2"; shift 2 ;;
+      --desktop) desktop="$2"; shift 2 ;;
+      --mode) mode="$2"; shift 2 ;;
+      --vnc-server) server="$2"; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+
+  sdir=$(session_dir "$name")
+  if [ -f "$sdir/pid" ] && kill -0 "$(cat "$sdir/pid")" 2>/dev/null; then
+    log "session '$name' is already running (pid $(cat "$sdir/pid"))"
+    return 0
+  fi
+
+  mkdir -p "$sdir"
+  echo "$distro" > "$sdir/distro"
+  echo "$geometry" > "$sdir/geometry"
+  echo "$port" > "$sdir/port"
+  echo "$display" > "$sdir/display"
+  echo "$desktop" > "$sdir/desktop"
+  echo "$server" > "$sdir/vnc_server"
+  echo "$mode" > "$sdir/mode"
+
+  log "starting session '$name': $distro, ${geometry}px, VNC port $port, display :$display"
+  nohup "$0" __session-run "$name" > "$LOGDIR/$name.log" 2>&1 &
+  echo $! > "$sdir/pid"
+
+  if [ "$mode" = "x11" ]; then
+    sleep 3
+    if [ -f "$sdir/pid" ] && kill -0 "$(cat "$sdir/pid")" 2>/dev/null; then
+      log "session '$name' is up on Termux:X11 display :$display"
+      return 0
+    fi
+    warn "session '$name' died early - see $LOGDIR/$name.log"
+    return 1
+  fi
+
+  # Wait until the VNC port answers.
+  for _ in $(seq 1 60); do
+    if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+      log "session '$name' is up on 127.0.0.1:$port"
+      return 0
+    fi
+    sleep 1
+  done
+  warn "session '$name' did not open port $port in time - see $LOGDIR/$name.log"
+  return 1
+}
+
+# Internal: the actual worker, started by cmd_session_start.
+__session_run() {
+  name="$1"
+  sdir=$(session_dir "$name")
+  distro=$(cat "$sdir/distro")
+  geometry=$(cat "$sdir/geometry")
+  port=$(cat "$sdir/port")
+  display=$(cat "$sdir/display")
+  desktop=$(cat "$sdir/desktop")
+  server=$(cat "$sdir/vnc_server")
+  mode=$(cat "$sdir/mode" 2>/dev/null || echo vnc)
+
+  export LD_PRELOAD=""
+  shared=""
+  if [ "$mode" = "x11" ]; then
+    # Termux:X11 is an X server on the phone itself: start it on the host,
+    # and share /tmp with the distro so the X socket is visible inside.
+    shared="--shared-tmp"
+    if command -v termux-x11 >/dev/null 2>&1; then
+      termux-x11 :$display >/dev/null 2>&1 &
+      sleep 2
+    else
+      log "termux-x11 is not installed, the desktop has nowhere to draw"
+    fi
+  fi
+  # Sound + microphone: Termux PulseAudio on the host with the OpenSL-ES
+  # sink (speaker) and source (microphone), shared to the distro over TCP.
+  if command -v pulseaudio >/dev/null 2>&1; then
+    pulseaudio --start --exit-idle-time=-1 \
+      --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1 port=4713" \
+      --load="module-sles-sink" --load="module-sles-source" 2>/dev/null || true
+  fi
+  proot-distro login $shared "$distro" -- /usr/bin/env bash -lc "
+    set -u
+    export HOME=/root
+    export XDG_RUNTIME_DIR=/tmp/runtime-root
+    mkdir -p \"\$XDG_RUNTIME_DIR\"
+    chmod 700 \"\$XDG_RUNTIME_DIR\"
+    export DISPLAY=:$display
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=llvmpipe
+    export QT_QPA_PLATFORM=xcb
+    export PULSE_SERVER=tcp:127.0.0.1:4713
+    cd /root
+    # The X server (skipped for Termux:X11, which is the X server)
+    if [ \"$mode\" = "x11" ]; then
+      true
+    elif command -v $server >/dev/null 2>&1; then
+      $server :$display -geometry $geometry -depth 24 -rfbport $port \\
+        -SecurityTypes None -AlwaysShared -localhost &
+      XPID=\$!
+    else
+      Xvfb :$display -geometry $geometry -depth 24 -screen 0 $geometryx24 &
+      XPID=\$!
+      x11vnc -display :$display -forever -shared -rfbport $port -localhost -nopw &
+    fi
+    sleep 2
+    # Sound and microphone come from the host PulseAudio (PULSE_SERVER).
+    pactl info >/dev/null 2>&1 || true
+    # The desktop environment
+    case \"$desktop\" in
+      xfce4|xfce)  dbus-run-session -- startxfce4 ;;
+      lxde)        dbus-run-session -- startlxde ;;
+      lxqt)        dbus-run-session -- startlxqt ;;
+      mate)        dbus-run-session -- mate-session ;;
+      kde|plasma|kde-plasma) dbus-run-session -- startplasma-x11 ;;
+      openbox)     openbox-session ;;
+      fluxbox)     fluxbox &
+                  twm &
+                  wait ;;
+      i3)          i3 ;;
+      awesome)     awesome ;;
+      gnome)       dbus-run-session -- gnome-session ;;
+      cinnamon)    dbus-run-session -- cinnamon-session ;;
+      lxde)        dbus-run-session -- startlxde ;;
+      none)        sleep infinity ;;
+      *)           dbus-run-session -- $desktop ;;
+    esac
+  "
+  rc=$?
+  echo "session '$name' exited with $rc"
+  rm -f "$sdir/pid"
+  return $rc
+}
+
+cmd_session_stop() {
+  name="${1:?usage: linuxdesk session stop <name>}"
+  sdir=$(session_dir "$name")
+  [ -d "$sdir" ] || die "unknown session '$name'"
+  if [ -f "$sdir/pid" ]; then
+    pid=$(cat "$sdir/pid")
+    if kill -0 "$pid" 2>/dev/null; then
+      log "stopping session '$name' (pid $pid)"
+      # Kill the whole process group: the X server and the desktop are children.
+      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      sleep 2
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$sdir/pid"
+  fi
+  # Clean the X lock files of the display.
+  display=$(cat "$sdir/display" 2>/dev/null || echo 1)
+  rm -f "/tmp/.X${display}-lock" "/tmp/.X11-unix/X${display}" 2>/dev/null || true
+  log "session '$name' stopped"
+}
+
+cmd_session_status() {
+  name="${1:?usage: linuxdesk session status <name>}"
+  sdir=$(session_dir "$name")
+  if [ ! -d "$sdir" ]; then
+    echo '{"state":"unknown"}'
+    return 1
+  fi
+  pid=$(cat "$sdir/pid" 2>/dev/null || echo 0)
+  state=stopped
+  if [ "$pid" != "0" ] && kill -0 "$pid" 2>/dev/null; then state=running; fi
+  port=$(cat "$sdir/port" 2>/dev/null || echo 0)
+  cat <<EOF
+{"state":"$state","pid":$pid,"port":$port,"geometry":"$(cat "$sdir/geometry" 2>/dev/null)","distro":"$(cat "$sdir/distro" 2>/dev/null)","desktop":"$(cat "$sdir/desktop" 2>/dev/null)","display":$(cat "$sdir/display" 2>/dev/null || echo 0)}
+EOF
+}
+
+cmd_session_resize() {
+  name="${1:?usage: linuxdesk session resize <name> WxH}"
+  geometry="${2:?usage: linuxdesk session resize <name> WxH}"
+  sdir=$(session_dir "$name")
+  [ -d "$sdir" ] || die "unknown session '$name'"
+  echo "$geometry" > "$sdir/geometry"
+  display=$(cat "$sdir/display")
+  port=$(cat "$sdir/port")
+  distro=$(cat "$sdir/distro")
+  log "resizing '$name' to $geometry"
+  # X servers accept a new size through the RFB SetDesktopSize message, which
+  # the app's viewer sends. The command line change is picked up on restart.
+  proot-distro login "$distro" -- /usr/bin/env bash -lc "
+    export DISPLAY=:$display
+    (command -v xrandr >/dev/null 2>&1 && xrandr --fb $geometry) || true
+  " >/dev/null 2>&1 || true
+}
+
+cmd_session_exec() {
+  name="${1:?usage: linuxdesk session exec <name> <command...>}"
+  shift
+  sdir=$(session_dir "$name")
+  [ -d "$sdir" ] || die "unknown session '$name'"
+  distro=$(cat "$sdir/distro")
+  display=$(cat "$sdir/display")
+  proot-distro login "$distro" -- /usr/bin/env bash -lc "
+    export DISPLAY=:$display
+    export HOME=/root
+    $*"
+}
+
+cmd_session_logs() {
+  name="${1:?usage: linuxdesk session logs <name>}"
+  tail -n "${2:-100}" "$LOGDIR/$name.log" 2>/dev/null || echo "(no log)"
+}
+
+# ------------------------------------------------------------------- app
+#
+# Installs packages inside a distribution or inside the distribution of a
+# running session.  The packages are the names of the Debian packages, the
+# optional first argument names the target.
+
+# Runs a shell command inside a distribution, without a running session.
+cmd_run() {
+  distro="${1:-$DISTRO}"; shift || true
+  [ $# -gt 0 ] || die "usage: linuxdesk run [distro] <command...>"
+  proot-distro login "$distro" -- /usr/bin/env bash -lc "
+    export DEBIAN_FRONTEND=noninteractive
+    export DISPLAY=:1 HOME=/root
+    $*" 2>&1 | tail -40
+}
+
+cmd_app() {
+  sub="${1:-list}"; shift || true
+  case "$sub" in
+    list)
+      echo "usage: linuxdesk app install [target] <package> [package...]"
+      echo "  target  a session name or a distribution, the default distribution otherwise"
+      ;;
+    install)
+      [ $# -gt 0 ] || die "usage: linuxdesk app install [target] <package> [package...]"
+      target=""
+      if [ -d "$(session_dir "$1")" ]; then
+        target="$1"; shift
+      elif proot-distro list 2>/dev/null | grep -q "^$1\$"; then
+        target="$1"; shift
+      fi
+      [ $# -gt 0 ] || die "usage: linuxdesk app install [target] <package> [package...]"
+      [ -n "$target" ] || target="$DISTRO"
+      pkgs="$*"
+      log "installing in '$target': $pkgs"
+      if [ -d "$(session_dir "$target")" ]; then
+        distro=$(cat "$(session_dir "$target")/distro")
+      else
+        distro="$target"
+      fi
+      proot-distro login "$distro" -- /usr/bin/env bash -lc "
+        export DEBIAN_FRONTEND=noninteractive
+        dpkg --configure -a || true
+        apt-get install -f -y || true
+        apt-get update -y
+        apt-get install -y --no-install-recommends $pkgs || { apt-get install -f -y; dpkg --configure -a; apt-get update -y; apt-get install -y --no-install-recommends $pkgs; }" 2>&1 | tail -30
+      ;;
+    *)
+      die "unknown: linuxdesk app $sub"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------- desktop
+#
+# The desktop environments the engine can install.
+
+desktop_packages() {
+  case "$1" in
+    xfce4|xfce)  echo "xfce4 xfce4-goodies" ;;
+    lxqt)         echo "lxqt" ;;
+    mate)         echo "mate-desktop-environment-core mate-desktop-environment-extra" ;;
+    kde|plasma)   echo "kde-plasma-desktop" ;;
+    lxde)         echo "lxde" ;;
+    awesome)      echo "awesome xterm" ;;
+    gnome)        echo "gnome-core gdm3" ;;
+    cinnamon)     echo "cinnamon" ;;
+    fluxbox)      echo "fluxbox xterm" ;;
+    *)            return 1 ;;
+  esac
+}
+
+cmd_desktop() {
+  sub="${1:-list}"; shift || true
+  case "$sub" in
+    list)
+      echo "xfce4   lightweight, the recommended one"
+      echo "lxqt    light and modern"
+      echo "mate    classic and familiar"
+      echo "kde     full featured, needs 4 GB of RAM"
+      ;;
+    install)
+      name="${1:?usage: linuxdesk desktop install <xfce4|lxqt|mate|kde> [target]}"
+      target="${2:-$DISTRO}"
+      pkgs=$(desktop_packages "$name") || die "unknown desktop '$name'"
+      log "installing the desktop '$name' in '$target'"
+      proot-distro login "$target" -- /usr/bin/env bash -lc "
+        export DEBIAN_FRONTEND=noninteractive
+        dpkg --configure -a || true
+        apt-get install -f -y || true
+        apt-get update -y
+        apt-get install -y --no-install-recommends $pkgs || { apt-get install -f -y; dpkg --configure -a; apt-get update -y; apt-get install -y --no-install-recommends $pkgs; }" 2>&1 | tail -30
+      ;;
+    *)
+      die "unknown: linuxdesk desktop $sub"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------- selftest
+
+cmd_selftest() {
+  ok=0; fail=0
+  check() {
+    if eval "$2" >/dev/null 2>&1; then
+      echo "  PASS  $1"; ok=$((ok+1))
+    else
+      echo "  FAIL  $1"; fail=$((fail+1))
+    fi
+  }
+  echo "LinuxDesk engine self test"
+  check "Termux prefix"           "[ -d '$PREFIX' ]"
+  check "proot-distro"            "command -v proot-distro"
+  check "python3 (for linuxdeskd)" "command -v python3"
+  check "nc"                      "command -v nc"
+  check "state directory"         "mkdir -p '$LIBDIR'"
+  check "a distribution"          "proot-distro list 2>/dev/null | grep -q ."
+  check "VNC server binary"       "proot-distro login ${DISTRO} -- sh -lc 'command -v Xtigervnc || command -v x11vnc'"
+  check "xkb data"                "proot-distro login ${DISTRO} -- sh -lc 'test -d /usr/share/X11/xkb'"
+  echo "  $ok passed, $fail failed"
+  [ "$fail" -eq 0 ]
+}
+
+
+# ----------------------------------------------------------------- doctor
+# Self-repair: fix broken package states, update outdated packages, verify
+# the whole stack. Safe to run any time; it is idempotent.
+
+cmd_repair_host() {
+  log "repairing Termux package system"
+  dpkg --configure -a 2>/dev/null || true
+  apt-get install -f -y 2>/dev/null || pkg install -f -y 2>/dev/null || true
+  rm -f "$PREFIX/var/lib/dpkg/lock-frontend" "$PREFIX/var/cache/apt/archives/lock" 2>/dev/null || true
+  dpkg --configure -a 2>/dev/null || true
+  log "updating package lists and upgrading outdated packages"
+  pkg update -y || termux-change-repo || true
+  pkg upgrade -y || { dpkg --configure -a 2>/dev/null || true; apt-get install -f -y 2>/dev/null || true; pkg upgrade -y || true; }
+}
+
+cmd_doctor() {
+  need_termux
+  echo "LinuxDesk doctor — diagnose, repair, update"
+  cmd_repair_host
+  if ! command -v proot-distro >/dev/null 2>&1; then
+    warn "proot-distro missing — installing"
+    pkg install -y proot-distro || true
+  fi
+  for d in $(proot-distro list 2>/dev/null | awk '/installed/{print $1}' | tr -d ' '); do
+    [ -n "$d" ] || continue
+    echo "repairing distro: $d"
+    proot-distro login "$d" -- /usr/bin/env bash -lc '
+      export DEBIAN_FRONTEND=noninteractive
+      if command -v apt-get >/dev/null 2>&1; then
+        dpkg --configure -a || true
+        apt-get install -f -y || true
+        apt-get update -y || true
+        apt-get upgrade -y || true
+      elif command -v pacman >/dev/null 2>&1; then
+        pacman -Syu --noconfirm || true
+      elif command -v apk >/dev/null 2>&1; then
+        apk update && apk upgrade || true
+      fi
+    ' 2>&1 | tail -5 || true
+  done
+  echo "doctor finished — running self test:"
+  cmd_selftest || true
+}
+
+
+load_config
+
+case "${1:-}" in
+  bootstrap) shift; cmd_bootstrap "$@" ;;
+  distro)    shift; cmd_distro "$@" ;;
+  session)   shift; cmd_session "$@" ;;
+  app)       shift; cmd_app "$@" ;;
+  run)       shift; cmd_run "$@" ;;
+  desktop)   shift; cmd_desktop "$@" ;;
+  selftest)  shift; cmd_selftest "$@" ;;
+  doctor)    shift; cmd_doctor "$@" ;;
+  repair)    shift; cmd_repair_host "$@" ;;
+  __session-run) shift; __session_run "$@" ;;
+  *)
+    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac
