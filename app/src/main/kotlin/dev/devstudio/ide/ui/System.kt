@@ -2,6 +2,7 @@ package dev.devstudio.ide.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,12 +52,18 @@ fun SystemScreen(
     var sizeMb by remember { mutableStateOf(0L) }
     var freeMb by remember { mutableStateOf(0L) }
     var tools by remember { mutableStateOf<List<Pair<String, Boolean>>>(emptyList()) }
+    var installingTool by remember { mutableStateOf<String?>(null) }
+    var toolLog by remember { mutableStateOf<String?>(null) }
+    var pkgCount by remember { mutableStateOf(0) }
 
     LaunchedEffect(ready, termux) {
         withContext(Dispatchers.IO) {
             freeMb = runCatching { Engine.freeSpaceMb(ctx) }.getOrDefault(0)
             sizeMb = runCatching { Engine.guestSizeMb(ctx) }.getOrDefault(0)
-            if (ready) tools = runCatching { Engine.tools(ctx) }.getOrDefault(emptyList())
+            if (ready) {
+                tools = runCatching { Engine.tools(ctx) }.getOrDefault(emptyList())
+                pkgCount = runCatching { Engine.packageCount(ctx) }.getOrDefault(0)
+            }
         }
     }
 
@@ -107,12 +114,64 @@ fun SystemScreen(
                         Spacer(Modifier.height(9.dp))
                         MonoBlock(it, maxLines = 10)
                     }
-                    if (tools.isNotEmpty()) {
+                    if (ready && tools.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        // The guest ships busybox only. A grey pill is not an error —
+                        // it means "not installed yet", and tapping one installs it.
+                        Text(
+                            "TOOLS · ${tools.count { it.second }}/${tools.size} installed · " +
+                                "guest has $pkgCount packages",
+                            color = Pal.faint, fontSize = 7.5.sp, letterSpacing = 1.1.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(5.dp))
+                        Row(Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             tools.forEach { (name, on) ->
-                                StatusPill(name, if (on) Pal.mint else Pal.faint, filled = on)
+                                val busy = installingTool == name
+                                Pressable(
+                                    onClick = {
+                                        if (!on && installingTool == null) {
+                                            installingTool = name
+                                            toolLog = null
+                                            scope.launch {
+                                                val out = withContext(Dispatchers.IO) {
+                                                    Engine.install(ctx, Engine.pkgFor(name))
+                                                }
+                                                tools = withContext(Dispatchers.IO) {
+                                                    runCatching { Engine.tools(ctx) }
+                                                        .getOrDefault(tools)
+                                                }
+                                                pkgCount = withContext(Dispatchers.IO) {
+                                                    runCatching { Engine.packageCount(ctx) }
+                                                        .getOrDefault(pkgCount)
+                                                }
+                                                toolLog = name + ": " + out.lines()
+                                                    .lastOrNull { it.isNotBlank() }
+                                                    .orEmpty()
+                                                installingTool = null
+                                            }
+                                        }
+                                    },
+                                    scaleDown = 0.94f
+                                ) {
+                                    StatusPill(
+                                        if (busy) "$name …" else if (on) name else "＋ $name",
+                                        if (on) Pal.mint else if (busy) Pal.amber else Pal.dim,
+                                        filled = on
+                                    )
+                                }
                             }
+                        }
+                        Text(
+                            if (installingTool != null) "installing ${installingTool} with apk… (needs network)"
+                            else "tap a grey tool to install it from Alpine's repos",
+                            color = Pal.faint, fontSize = 8.5.sp,
+                            modifier = Modifier.padding(top = 5.dp)
+                        )
+                        toolLog?.let {
+                            Spacer(Modifier.height(6.dp))
+                            MonoBlock(it, tone = Pal.dim, maxLines = 4)
                         }
                     }
                 }
@@ -134,8 +193,9 @@ fun SystemScreen(
                             Text(if (termux) "Termux installed" else "Add the real Termux userland",
                                 color = Pal.text, fontSize = 13.5.sp, fontWeight = FontWeight.Black)
                             Text(
-                                if (termux) "${TermuxUserland.installedSizeMb(ctx)} MB · ${TermuxUserland.buildFor(ctx).arch} · runs natively"
-                                else "Termux's own bootstrap, inside Hakatron. bash, git, python, apt — no other app.",
+                                if (termux) "${TermuxUserland.installedSizeMb(ctx)} MB · ${TermuxUserland.buildFor(ctx).arch} · " +
+                                    (if (TermuxUserland.script(ctx) != null) "native · real pty" else "native · pipes")
+                                else "Termux's own bootstrap, inside Hakatron. bash, apt, git, python — no other app.",
                                 color = Pal.dim, fontSize = 10.sp, lineHeight = 14.sp
                             )
                         }
@@ -152,7 +212,8 @@ fun SystemScreen(
                             if (termux) "Re-install / update" else "Install Termux userland (~${TermuxUserland.buildFor(ctx).approxMb} MB)",
                             from = Pal.cyan, to = Pal.mint
                         ) {
-                            if (!ready) { tlog = "Set the engine up first — the unpack runs inside it."; return@GlowButton }
+                            // The unpack runs in Kotlin on the host, so it does not need
+                            // the Alpine engine — only network and storage.
                             installing = true
                             progress = 0f
                             tlog = null
@@ -180,8 +241,9 @@ fun SystemScreen(
                             maxLines = 12)
                     }
                     Spacer(Modifier.height(8.dp))
-                    Text("Expected ~${TermuxUserland.buildFor(ctx).approxMb} MB download, ~200 MB on disk, " +
-                        "fetched once from the Termux project's own release page. Hakatron never uploads anything.",
+                    Text("${TermuxUserland.buildFor(ctx).approxMb} MB download, ~90 MB unpacked, " +
+                        "fetched once from the Termux project's own release (${TermuxUserland.TAG}). " +
+                        "Checksum verified after download. Hakatron never uploads anything.",
                         color = Pal.faint, fontSize = 9.sp, lineHeight = 13.sp)
                 }
             }

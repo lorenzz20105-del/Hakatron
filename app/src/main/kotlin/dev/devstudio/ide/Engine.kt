@@ -65,6 +65,25 @@ object Engine {
         }
     }
 
+    /** Alpine package that provides a probed tool. */
+    fun pkgFor(tool: String): String = when (tool) {
+        "gcc" -> "gcc"
+        "make" -> "make"
+        "git" -> "git"
+        "python3" -> "python3"
+        "node" -> "nodejs"
+        "javac" -> "openjdk17"
+        "rustc" -> "rust"
+        else -> tool
+    }
+
+    /** How many apk packages the guest actually has installed — not a guess. */
+    fun packageCount(ctx: Context): Int {
+        if (!isReady(ctx)) return 0
+        val out = exec(ctx, "grep -c '^P:' /lib/apk/db/installed 2>/dev/null || echo 0", 30_000)
+        return out.lines().mapNotNull { it.trim().toIntOrNull() }.firstOrNull() ?: 0
+    }
+
     /** Installs guest packages and returns the tail of apk's own output. */
     fun install(ctx: Context, pkg: String, log: (String) -> Unit = {}): String {
         if (!isReady(ctx)) return "Set up the engine first."
