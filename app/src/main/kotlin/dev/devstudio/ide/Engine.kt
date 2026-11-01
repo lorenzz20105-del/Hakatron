@@ -179,7 +179,8 @@ object Engine {
         val root = rootfs(ctx).absolutePath
         File(baseDir(ctx), "tmp").mkdirs()
         return listOf(
-            "$lib/libldlinux.so", "--library-path", lib, "$lib/libproot.so",
+            "$lib/libldlinux.so", "--library-path", lib, "$lib/libproot.so"
+        ) + currentRung().args + listOf(
             "-0", "-r", root,
             "-b", "/dev", "-b", "/proc", "-b", "/sys",
             "-b", "/dev/pts",
@@ -198,11 +199,86 @@ object Engine {
         "HOME" to "/root",
         "TERM" to "xterm-256color",
         "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ) + currentRung().env + hostEnv
+
+    // ---------------------------------------------------- launch compatibility
+    /**
+     * Devices differ in how the kernel treats PRoot's syscall interception. Instead
+     * of a single hard-coded incantation, the launch is a small ladder: if a rung
+     * dies with SIGSYS (exit 159 — Android's seccomp filter rejecting `process_vm_*`
+     * or `ptrace` acceleration), the next rung is tried and **remembered**, so the
+     * device only pays for the retry once.
+     */
+    private data class Rung(val name: String, val env: Map<String, String>, val args: List<String>)
+
+    private val ladder = listOf(
+        Rung("default", emptyMap(), emptyList()),
+        Rung("no-seccomp", mapOf("PROOT_NO_SECCOMP" to "1"), emptyList()),
+        Rung("kill-on-exit", mapOf("PROOT_NO_SECCOMP" to "1"), listOf("--kill-on-exit")),
+        Rung("link2symlink", mapOf("PROOT_NO_SECCOMP" to "1"), listOf("--kill-on-exit", "--link2symlink")),
+        Rung("no-kernel-release", mapOf("PROOT_NO_SECCOMP" to "1"),
+            listOf("--kill-on-exit", "--link2symlink", "-v", "0"))
     )
+
+    @Volatile private var rungIndex = 0
+    @Volatile var launchMode: String = "default"; private set
+
+    /** Extra environment that must be set on the HOST process, not inside the guest. */
+    private val hostEnv = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * Some "fixes" are host-side: `export PROOT_NO_SECCOMP=1` inside the guest does
+     * nothing at all, because the variable has to be in PRoot's own environment.
+     * The planner's fix table asked for the guest command; this routes it to where
+     * it actually works.
+     */
+    fun applyHostFix(cmd: String): Boolean {
+        var applied = false
+        Regex("(PROOT_[A-Z_]+|ANDROID_[A-Z_]+)=([^\\s;]+)").findAll(cmd).forEach { m ->
+            hostEnv[m.groupValues[1]] = m.groupValues[2]
+            applied = true
+        }
+        if (applied) rungIndex = maxOf(rungIndex, 1)
+        return applied
+    }
+
+    private fun currentRung(): Rung = ladder[rungIndex.coerceIn(0, ladder.size - 1)]
+
+    /** Where the stack died, in words a user can act on. */
+    fun diagnose(ctx: Context): String {
+        if (!isReady(ctx)) return "No guest yet — set the engine up first."
+        val lib = File(ctx.applicationInfo.nativeLibraryDir)
+        val missing = listOf("libldlinux.so", "libproot.so", "libglibc.so", "libtalloc.so")
+            .filterNot { File(lib, it).exists() }
+        if (missing.isNotEmpty())
+            return "The APK is missing ${missing.joinToString(", ")} for this device's CPU (" +
+                "native dir ${lib.absolutePath}). That is a build problem, not a project problem."
+        val probe = exec(ctx, "echo PROBE-OK; uname -m", 30_000)
+        return "launch mode: ${currentRung().name}\n$probe"
+    }
 
     /** Runs a command inside the built-in Linux and returns its output. */
     fun exec(ctx: Context, guestCmd: String, timeoutMs: Long = 120_000): String {
         if (!isReady(ctx)) return "Built-in Linux is not set up yet — run: linux-setup"
+        var out = execOnce(ctx, guestCmd, timeoutMs)
+        // 159 = 128 + SIGSYS: the kernel refused PRoot's interception. Climb the ladder.
+        while (Regex("\\[exit 159").containsMatchIn(out) && rungIndex < ladder.size - 1) {
+            rungIndex++
+            launchMode = currentRung().name
+            val retry = execOnce(ctx, guestCmd, timeoutMs)
+            out = if (Regex("\\[exit 159").containsMatchIn(retry))
+                retry + "\n[retried in ${currentRung().name} mode too]"
+            else retry + "\n[built-in Linux recovered in \u201c${currentRung().name}\u201d mode]"
+        }
+        if (Regex("\\[exit 159").containsMatchIn(out) && rungIndex == ladder.size - 1) {
+            out += "\n[This device's kernel blocks PRoot's syscall interception (SIGSYS). " +
+                "Every launch mode was tried. Use the Termux engine, or run the project on a " +
+                "device where PRoot is allowed.]"
+        }
+        return out
+    }
+
+    private fun execOnce(ctx: Context, guestCmd: String, timeoutMs: Long): String {
         return try {
             val pb = ProcessBuilder(prootCommand(ctx, guestCmd)).redirectErrorStream(true)
             pb.environment().putAll(prootEnv(ctx))
@@ -216,7 +292,8 @@ object Engine {
             if (!done) { proc.destroyForcibly(); return out.toString().trimEnd() + "\n[timeout after ${timeoutMs / 1000}s — command killed]" }
             reader.join(2000)
             val text = out.toString().trimEnd()
-            (if (text.isBlank()) "(no output)" else text) + "\n[exit ${proc.exitValue()} · built-in Linux · no Termux]"
+            (if (text.isBlank()) "(no output)" else text) +
+                "\n[exit ${proc.exitValue()} · built-in Linux · ${currentRung().name} · no Termux]"
         } catch (e: Exception) {
             "Built-in Linux error: ${e.message}"
         }

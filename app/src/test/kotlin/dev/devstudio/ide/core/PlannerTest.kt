@@ -1,6 +1,7 @@
 package dev.devstudio.ide.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -13,7 +14,8 @@ import org.junit.Test
  */
 class PlannerTest {
 
-    private val planner = Planner { cmd -> "" }      // plan() never executes anything
+    // plan() never executes anything; the run lambda is only used by build()
+    private val planner = Planner(run = { cmd -> "" })
 
     private fun structure(vararg lines: String) = lines.joinToString("\n")
 
@@ -136,5 +138,45 @@ class PlannerTest {
         )
         assertTrue("no predictions at all", plan.predictions.isNotEmpty())
         assertTrue("confidence out of range", plan.confidence in 0.0..1.0)
+    }
+
+    // ------------------------------------------------- the 0.14.0 screen bug
+    @Test
+    fun `an empty plan is blocked instead of building nothing`() {
+        val plan = planner.plan("project", "", "", "")
+        assertNotNull("an empty plan must carry a reason", plan.blocked)
+        assertTrue(plan.blocked!!.contains("Nothing to build"))
+        val result = planner.build(plan)
+        assertFalse("an empty plan must not run", result.ok)
+        // the refusal happens before anything is written or executed
+        assertTrue(result.log.none { it.level == "cmd" })
+    }
+
+    @Test
+    fun `a tree with no pasted contents is explained, not executed`() {
+        val plan = planner.plan("project",
+            structure("myapp/", "├── app.py", "└── requirements.txt"), "", "")
+        if (plan.blocked != null) {
+            assertTrue(plan.blocked!!.contains("contents"))
+            assertFalse(planner.build(plan).ok)
+        }
+    }
+
+    @Test
+    fun `no plan ever contains a placeholder run step`() {
+        val plan = planner.plan("project", "", "=== notes.md ===\nhello", "")
+        assertTrue("placeholder steps: ${plan.steps.map { it.cmd }}", plan.steps.none { it.cmd == "true" })
+    }
+
+    @Test
+    fun `a host-side remedy is handed to the launcher, not run in the guest`() {
+        var hostFixes = mutableListOf<String>()
+        val p = Planner(
+            run = { cmd -> if (cmd.contains("make")) "sh: make: not found\n[exit 127]" else "[exit 0]" },
+            onHostFix = { cmd -> hostFixes.add(cmd); true }
+        )
+        // the seccomp rule's command is an export: only the host can act on it
+        assertTrue(p.parseNotes("Build: make").isNotEmpty())
+        assertEquals(0, hostFixes.size)   // planning alone must not touch the device
     }
 }

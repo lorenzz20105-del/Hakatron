@@ -67,6 +67,40 @@ object Analyzer {
 
     data class Parsed(val files: List<String>, val dirs: List<String>)
 
+    /**
+     * "Is this a project tree, or did someone paste source code?"
+     *
+     * The structure box keeps getting filled with an import block, and a naive line
+     * parser then reports a "Kotlin project with 547 files" that writes nothing.
+     * A tree is paths; code has keywords, braces and semicolons. Two hits is enough
+     * to be sure, one hit plus no slash at all is a syntax line.
+     */
+    fun isSourceCode(text: String): Boolean {
+        val lines = text.lines().filter { it.isNotBlank() }.take(120)
+        if (lines.isEmpty()) return false
+        val codey = lines.count { l ->
+            val t = l.trim()
+            Regex("^(import|package|from|using|#include|require|use|const|let|var|fun|def|class|struct|" +
+                "public|private|protected|static|interface|enum|impl|fn|func|type|namespace|@\\w+)" +
+                "\\s+[\\w.{*'\"]").containsMatchIn(t) ||
+                Regex("\\b(fun|def|fn|func|class|struct|public|private|static)\\s+\\w+\\s*\\(").containsMatchIn(t) ||
+                (t.endsWith("{") || t.endsWith("}") || t.endsWith(";")) ||
+                t == "}" || t == "{"
+        }
+        // a tree has paths: "dir/", "src/main.kt", "├── file.py"
+        val pathy = lines.count { l -> l.contains('/') || Regex("\\.[A-Za-z0-9]{1,6}\\s*$").containsMatchIn(l.trim()) }
+        return codey >= 2 && codey > pathy
+    }
+
+    /** Source lines must never become file names. */
+    private fun isCodeLine(line: String): Boolean {
+        val t = line.trim()
+        if (t.isEmpty()) return true
+        return Regex("^(import|package|using|#include|from\\s+\\S+\\s+import|require\\s*\\()").containsMatchIn(t) ||
+            t.endsWith(";") || t.endsWith("{") || t == "}" || t.startsWith("//") ||
+            t.startsWith("/*") || t.startsWith("*") || t.startsWith("@")
+    }
+
     /** "myapp/\n├── app.py\n└── templates/index.html" -> file + dir list. */
     fun readStructure(text: String): Parsed {
         val files = ArrayList<String>()
@@ -85,7 +119,8 @@ object Analyzer {
         raws.forEach { raw ->
             var line = raw.replace("│", " ").replace("├──", " ")
                 .replace("└──", " ").replace("─", " ").trimEnd()
-            if (line.isBlank()) return@forEach
+            // an import block pasted into the structure box is not a file tree
+            if (line.isBlank() || isCodeLine(line)) return@forEach
             val depth = levelOf(line.length - line.trimStart().length)
             var name = line.trim().split(Regex("\\s{2,}")).last().trim().trim('/')
             name = name.replace(Regex("\\s*#.*$"), "").trim()
@@ -277,7 +312,7 @@ object Analyzer {
             "ruby" -> "bundle exec ruby ${files.firstOrNull { it.endsWith(".rb") } ?: "app.rb"}" to null
             "php" -> "php ${files.firstOrNull { it.endsWith(".php") } ?: "index.php"}" to null
             "shell" -> "sh ${files.firstOrNull { it.endsWith(".sh") } ?: "run.sh"}" to null
-            else -> "true" to null
+            else -> "" to null        // no stack, no command: never `true`
         }
     }
 }

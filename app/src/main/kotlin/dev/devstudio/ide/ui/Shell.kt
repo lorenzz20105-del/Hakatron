@@ -8,6 +8,23 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -59,62 +76,107 @@ fun HakatronApp() {
     }
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { SharedFiles.ensure(ctx) } }
 
+    val haptic = LocalHapticFeedback.current
+
     Scaffold(containerColor = Bg, bottomBar = {
-        NavigationBar(containerColor = Color(0xFF0E1016), tonalElevation = 0.dp) {
+        NavigationBar(containerColor = Color(0xFF0E1016), tonalElevation = 0.dp, modifier = Modifier.height(64.dp)) {
             listOf("Home", "Files", "Editor", "Shell", "System").forEachIndexed { i, label ->
                 val on = tab == i
-                val tint by androidx.compose.animation.animateColorAsState(
-                    if (on) Violet else Dim, androidx.compose.animation.core.tween(180), label = "tint")
-                val pill by androidx.compose.animation.animateColorAsState(
-                    if (on) Color(0x332A1F4E) else Color.Transparent,
-                    androidx.compose.animation.core.tween(180), label = "pill")
+                // effect tokens: colour never bounces; spatial tokens: the pill grows
+                val tint by animateColorAsState(
+                    if (on) Violet else Dim, Motion.fade(160), label = "tint")
+                val pillBy by androidx.compose.animation.animateColorAsState(
+                    if (on) Color(0x332A1F4E) else Color.Transparent, Motion.fade(200), label = "pill")
+                val pillW by animateDpAsState(if (on) 46.dp else 30.dp, Motion.expressive(), label = "pillW")
+                val pillH by animateDpAsState(if (on) 27.dp else 22.dp, Motion.expressive(), label = "pillH")
+                val lift by animateDpAsState(if (on) (-1).dp else 0.dp, Motion.expressive(), label = "lift")
                 NavigationBarItem(
                     selected = on,
-                    onClick = { tab = i },
-                    icon = {
-                        Box(Modifier.size(38.dp, 24.dp).background(pill, RoundedCornerShape(9.dp)),
-                            contentAlignment = Alignment.Center) { TabIcon(i, tint) }
+                    onClick = {
+                        if (tab != i) {
+                            runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                            tab = i
+                        }
                     },
-                    label = { Text(label, fontSize = 9.5.sp, color = tint,
-                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal) }
+                    icon = {
+                        Box(
+                            Modifier
+                                .size(pillW, pillH)
+                                .offset(y = lift)
+                                .background(pillBy, RoundedCornerShape(if (on) 9.dp else 11.dp)),
+                            contentAlignment = Alignment.Center
+                        ) { TabIcon(i, tint) }
+                    },
+                    label = {
+                        Text(label, fontSize = 9.5.sp, color = tint,
+                            fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.graphicsLayer { alpha = if (on) 1f else 0.78f })
+                    }
                 )
             }
         }
     }) { pad ->
-        // full-screen flows
-        if (showTermux) {
-            Box(Modifier.padding(pad).fillMaxSize()) { TermuxScreen { showTermux = false } }
-            return@Scaffold
+        // full-screen flows rise over the app like a sheet
+        val flow: String? = when {
+            showTermux -> "termux"
+            showBuild -> "build"
+            previewUrl != null -> "preview"
+            else -> null
         }
-        if (showBuild) {
+        AnimatedVisibility(
+            visible = flow != null,
+            enter = slideInVertically(Motion.spatial()) { it / 12 } + fadeIn(Motion.fade(160)) +
+                scaleIn(Motion.spatial(), initialScale = 0.985f),
+            exit = slideOutVertically(Motion.spatial()) { it / 18 } + fadeOut(Motion.fade(120)) +
+                scaleOut(Motion.spatial(), targetScale = 0.99f),
+            label = "flow"
+        ) {
             Box(Modifier.padding(pad).fillMaxSize()) {
-                BuildStudio(engineReady, onPreview = { previewUrl = it }, onClose = { showBuild = false })
+                when (flow) {
+                    "termux" -> TermuxScreen { showTermux = false }
+                    "build" -> BuildStudio(engineReady, onPreview = { previewUrl = it }, onClose = { showBuild = false })
+                    "preview" -> previewUrl?.let { PreviewScreen(it) { previewUrl = null } }
+                }
             }
-            return@Scaffold
-        }
-        previewUrl?.let { url ->
-            Box(Modifier.padding(pad).fillMaxSize()) { PreviewScreen(url) { previewUrl = null } }
-            return@Scaffold
         }
 
-        Column(Modifier.padding(pad).fillMaxSize()) {
-            when (tab) {
-                0 -> HomeScreen(
-                    ready = engineReady, busy = busy, setupLog = setupLog,
-                    onSetup = runSetup, verdict = verdict,
-                    onBuild = { showBuild = true },
-                    onEditor = { tab = 2 },
-                    onFiles = { tab = 1 },
-                    onTermux = { showTermux = true },
-                    onSystem = { tab = 4 }
-                )
-                1 -> FilesScreen(ready = engineReady, onOpenInEditor = { path ->
-                    editorPath = path; tab = 2
-                })
-                2 -> EditorScreen(onPreview = { previewUrl = it }, initialPath = editorPath)
-                3 -> TerminalScreen(engineReady)
-                4 -> SystemScreen(engineReady, busy, setupLog,
-                    onTermux = { showTermux = true }, onSetup = runSetup)
+        // Tabs cross-fade along the direction you moved, so the app feels like one
+        // surface being navigated rather than five screens being swapped.
+        var prevTab by remember { mutableStateOf(tab) }
+        val direction = if (tab >= prevTab) 1 else -1
+        LaunchedEffect(tab) { prevTab = tab }
+        AnimatedContent(
+            targetState = tab,
+            transitionSpec = {
+                (
+                    slideInHorizontally(Motion.spatial()) { full -> (full / 14) * direction } +
+                        fadeIn(Motion.fade<Float>(170))
+                    ) togetherWith (
+                    slideOutHorizontally(Motion.spatial()) { full -> -(full / 14) * direction } +
+                        fadeOut(Motion.fade<Float>(120))
+                    )
+            },
+            label = "tab-content"
+        ) { current ->
+            Column(Modifier.padding(pad).fillMaxSize()) {
+                when (current) {
+                    0 -> HomeScreen(
+                        ready = engineReady, busy = busy, setupLog = setupLog,
+                        onSetup = runSetup, verdict = verdict,
+                        onBuild = { showBuild = true },
+                        onEditor = { tab = 2 },
+                        onFiles = { tab = 1 },
+                        onTermux = { showTermux = true },
+                        onSystem = { tab = 4 }
+                    )
+                    1 -> FilesScreen(ready = engineReady, onOpenInEditor = { path ->
+                        editorPath = path; tab = 2
+                    })
+                    2 -> EditorScreen(onPreview = { previewUrl = it }, initialPath = editorPath)
+                    3 -> TerminalScreen(engineReady)
+                    4 -> SystemScreen(engineReady, busy, setupLog,
+                        onTermux = { showTermux = true }, onSetup = runSetup)
+                }
             }
         }
     }
@@ -168,9 +230,10 @@ private fun HomeScreen(
         Spacer(Modifier.height(14.dp))
 
         // hero — continue card
-        Card(colors = CardDefaults.cardColors(containerColor = Color.Transparent),
-            shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.background(
+        Staggered(index = 0) { m ->
+        Card(modifier = m, colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+            shape = RoundedCornerShape(18.dp)) {
+            Column(Modifier.fillMaxWidth().background(
                 Brush.linearGradient(listOf(Color(0xFF1B1B3A), Color(0xFF241A44), Color(0xFF2A1636))),
                 RoundedCornerShape(18.dp)).padding(16.dp)) {
                 Text(if (recents.isEmpty()) "START HERE" else "CONTINUE",
@@ -200,6 +263,7 @@ private fun HomeScreen(
                 }
             }
         }
+        }
         if (!ready) {
             Spacer(Modifier.height(10.dp))
             Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF221A12)),
@@ -221,12 +285,14 @@ private fun HomeScreen(
         Spacer(Modifier.height(11.dp))
 
         // KPI tiles — bento row
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Kpi(Modifier.weight(1f), "ENGINE", if (ready) "Ready" else "Setup",
-                if (ready) Green else Amber)
-            Kpi(Modifier.weight(1f), "FILES", "$fileCount", Cyan)
-            Kpi(Modifier.weight(1f), "STORAGE", "${freeMb / 1024} GB", Dim)
-            Kpi(Modifier.weight(1f), "FIXES", "${store.fixCount()}", Violet)
+        Staggered(index = 1) { m ->
+            Row(m.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Kpi(Modifier.weight(1f), "ENGINE", if (ready) "Ready" else "Setup",
+                    if (ready) Green else Amber)
+                Kpi(Modifier.weight(1f), "FILES", "$fileCount", Cyan)
+                Kpi(Modifier.weight(1f), "STORAGE", "${freeMb / 1024} GB", Dim)
+                Kpi(Modifier.weight(1f), "FIXES", "${store.fixCount()}", Violet)
+            }
         }
         Spacer(Modifier.height(14.dp))
 
@@ -274,8 +340,10 @@ internal fun Pill(text: String, tint: Color) {
 
 @Composable
 internal fun Kpi(mod: Modifier, label: String, value: String, tint: Color) {
-    Card(mod, shape = RoundedCornerShape(13.dp), colors = CardDefaults.cardColors(containerColor = Surf)) {
-        Column(Modifier.padding(10.dp)) {
+    val shown by animateFloatAsState(1f, Motion.spatial(), label = "kpi")
+    Card(mod, shape = RoundedCornerShape(13.dp),
+        colors = CardDefaults.cardColors(containerColor = Surf)) {
+        Column(Modifier.padding(10.dp).graphicsLayer { alpha = shown }) {
             Text(label, color = Dim, fontSize = 8.sp, letterSpacing = 1.sp)
             Text(value, color = tint, fontSize = 14.sp, fontWeight = FontWeight.Black, maxLines = 1)
         }
@@ -284,14 +352,16 @@ internal fun Kpi(mod: Modifier, label: String, value: String, tint: Color) {
 
 @Composable
 private fun Tile(mod: Modifier, title: String, sub: String, tint: Color, onClick: () -> Unit) {
-    Card(mod.clickable { onClick() }, shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = Surf),
-        border = BorderStroke(1.dp, LineC)) {
-        Column(Modifier.padding(12.dp)) {
-            Box(Modifier.size(6.dp).background(tint, RoundedCornerShape(3.dp)))
-            Spacer(Modifier.height(6.dp))
-            Text(title, color = Txt, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
-            Text(sub, color = Dim, fontSize = 9.5.sp)
+    Pressable(onClick = onClick, modifier = mod) {
+        Card(shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = Surf),
+            border = BorderStroke(1.dp, LineC)) {
+            Column(Modifier.padding(12.dp)) {
+                Box(Modifier.size(6.dp).background(tint, RoundedCornerShape(3.dp)))
+                Spacer(Modifier.height(6.dp))
+                Text(title, color = Txt, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                Text(sub, color = Dim, fontSize = 9.5.sp)
+            }
         }
     }
 }

@@ -8,7 +8,11 @@ package dev.devstudio.ide.core
  * rules that scored 23/27 builds and 0 unexpected failures in the Python
  * prototype (ide/smart/).
  */
-class Planner(private val run: (String) -> String) {
+class Planner(
+    private val run: (String) -> String,
+    /** host-side remedies (PROOT_*, environment of the launcher) — applied where they work */
+    private val onHostFix: (String) -> Boolean = { false }
+) {
 
     data class Step(val kind: String, val cmd: String, val why: String, val source: String = "inferred")
     data class Issue(val file: String, val sev: String, val line: Int, val msg: String)
@@ -30,7 +34,9 @@ class Planner(private val run: (String) -> String) {
         val contents: Map<String, String>,
         val port: Int?,
         val runCmd: String,
-        val ecosystem: String?
+        val ecosystem: String?,
+        /** set when the plan must not be executed, with the reason a human can act on */
+        val blocked: String? = null
     )
 
     // ---------------------------------------------------------------- notes
@@ -123,7 +129,11 @@ class Planner(private val run: (String) -> String) {
         noteMap["test"]?.forEach { steps.add(Step("test", it, "from your notes", "notes")) }
         noteMap["run"]?.forEach { steps.add(Step("run", it, "from your notes", "notes")) }
 
-        if (steps.none { it.kind == "run" }) {
+        // A plan with nothing to write is not a plan: 0.14.0 happily "built" an empty
+        // project and ran `true`, which then failed with a driver error that had
+        // nothing to do with the user's code.
+        val nothingToDo = contents.isEmpty() && parsed.files.isEmpty()
+        if (!nothingToDo && steps.none { it.kind == "run" && base.run.isNotBlank() && base.run != "true" }) {
             if (!steps.any { it.kind == "install" } && base.pip.isNotEmpty()) {
                 // `-r requirements.txt` only when that file actually lists something;
                 // an empty one would install nothing and leave the imports broken.
@@ -182,11 +192,24 @@ class Planner(private val run: (String) -> String) {
 
         val predictions = predict(base, contents, steps)
         val issues = review(contents)
+        val keptSteps = steps.filterNot { it.cmd.isBlank() || it.cmd == "true" }
+        val blocked = when {
+            nothingToDo ->
+                "Nothing to build: no files and no tree were read. Paste the tree in step 1 " +
+                "and the code in step 2 (or use \u201cRead a project tree from a picture\u201d)."
+            contents.isEmpty() && parsed.files.isNotEmpty() ->
+                "The tree lists ${parsed.files.size} file(s) but none of their contents were pasted, " +
+                "so there is nothing to compile. Add them in step 2, or build just to create the folders."
+            keptSteps.isEmpty() ->
+                "No build command could be inferred from this project, so nothing is run. " +
+                "Add a \u201cBuild:\u201d line to step 3 and it will be used exactly as written."
+            else -> null
+        }
         return Plan(name = name.ifBlank { base.label }, stack = base.stack, label = base.label,
-            confidence = base.confidence, evidence = base.evidence, steps = steps,
+            confidence = base.confidence, evidence = base.evidence, steps = keptSteps,
             predictions = predictions, issues = issues, pip = base.pip, npm = base.npm,
             files = base.files, contents = contents, port = base.port, runCmd = base.run,
-            ecosystem = eco?.first)
+            ecosystem = eco?.first, blocked = blocked)
     }
 
     private fun partsToMap(files: List<String>, parts: String): Map<String, String> =
@@ -251,6 +274,10 @@ class Planner(private val run: (String) -> String) {
     fun build(plan: Plan, memory: MutableMap<String, String> = HashMap(),
               onLearn: (String, String) -> Unit = { _, _ -> }, maxAttempts: Int = 4): Result {
         val log = ArrayList<LogLine>()
+        plan.blocked?.let { why ->
+            log.add(LogLine("stop", why))
+            return Result(false, log, 0, why, plan.port, null)
+        }
         var fixes = 0
         var port = plan.port
         val env = HashMap<String, String>()
@@ -339,6 +366,17 @@ class Planner(private val run: (String) -> String) {
                     }
                     log.add(LogLine("err", "no config file to patch — stopping instead of guessing"))
                     return Result(false, log, fixes, fix.why, port, null)
+                }
+                // Some remedies are not guest commands at all. `export PROOT_NO_SECCOMP=1`
+                // run inside the guest is a no-op: the variable has to be in PRoot's own
+                // environment. Asking the host to set it, then retrying the same step, is
+                // what actually fixes exit 159.
+                val hostish = fix.kind == "seccomp" ||
+                    (fix.cmd != null && Regex("^export\\s+(PROOT_|ANDROID_)").containsMatchIn(fix.cmd))
+                if (hostish && fix.cmd != null && onHostFix(fix.cmd)) {
+                    log.add(LogLine("fix", "${fix.why}  →  applied to the launcher, retrying"))
+                    fixes++
+                    continue
                 }
                 if (fix.cmd != null) {
                     if (fix.cmd == lastFix && ++sameFix >= 3) {

@@ -1,6 +1,8 @@
 package dev.devstudio.ide.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -116,5 +118,50 @@ class AnalyzerTest {
         val mods = Analyzer.localModules(listOf("src/utils.py", "app.py"))
         assertTrue(mods.contains("utils"))
         assertNotNull(mods)
+    }
+
+    // ------------------------------------------------- the 0.14.0 screen bug
+    @Test
+    fun `an import block is recognised as code, not a tree`() {
+        val paste = """
+            import android.content.Context
+            import com.example.idebot.actions.*
+            import com.example.idebot.core.*
+            import com.example.idebot.editor.*
+            import com.example.idebot.hotkey.HotkeyManager
+            import com.example.idebot.plugins.PluginRegistry
+        """.trimIndent()
+        assertTrue("an import block must be flagged as code", Analyzer.isSourceCode(paste))
+    }
+
+    @Test
+    fun `a real tree is not mistaken for code`() {
+        assertFalse(Analyzer.isSourceCode(fourSpace))
+        assertFalse(Analyzer.isSourceCode("""
+            myapp/
+            ├── app.py
+            ├── requirements.txt
+            └── templates/index.html
+        """.trimIndent()))
+        assertFalse(Analyzer.isSourceCode(""))
+    }
+
+    @Test
+    fun `code pasted into the structure box produces no structure`() {
+        val paste = """
+            package com.example.idebot
+            import android.content.Context
+            fun main() {
+                println("hi")
+            }
+        """.trimIndent()
+        val p = Analyzer.readStructure(paste)
+        assertEquals("code must not become files", 0, p.files.size)
+    }
+
+    @Test
+    fun `an unknown stack never invents a run command`() {
+        val plan = Analyzer.analyze(listOf("notes.md"), emptyList(), emptyMap())
+        assertNotEquals("true", plan.run)
     }
 }
