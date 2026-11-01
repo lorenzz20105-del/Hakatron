@@ -1,55 +1,64 @@
 package dev.devstudio.ide.core
 
-import dev.devstudio.ide.ui.renamePlaceholder
-import dev.devstudio.ide.ui.suggestFileName
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * The parts box names files. 0.16.0 shipped a literal `=== paste_here.kt ===`
- * header, so Python source was planned as a Kotlin project. These tests pin the
- * fix: the name is inferred from the project, and a stale placeholder is replaced.
+ * Naming and splitting. 0.16.0 shipped a literal `=== paste_here.kt ===` header, so
+ * Python source was planned as a Kotlin project and everything was one part.
  */
 class BuildNamingTest {
 
     @Test
-    fun `python tree suggests a python file`() {
-        val tree = "myapp/\n├── app.py\n├── requirements.txt\n└── templates/index.html"
-        assertEquals("main.py", suggestFileName(tree, ""))
+    fun `idle names a class after the class`() {
+        val kotlin = "package com.exam.le.idebot.core\n\nclass VariableResolver {\n    fun go() = 1\n}"
+        assertEquals("VariableResolver.kt", Parts.inferName(kotlin))
     }
 
     @Test
-    fun `cpp wins over plain c`() {
-        assertEquals("main.cpp", suggestFileName("proj/\n├── main.cpp\n└── util.c", ""))
+    fun `idle names a python function`() {
+        assertEquals("clean.py", Parts.inferName("def clean(text):\n    return text.strip()\n"))
     }
 
     @Test
-    fun `rust tree suggests rs`() {
-        assertEquals("main.rs", suggestFileName("app/\n├── Cargo.toml\n└── src/main.rs", ""))
+    fun `idle names a rust function`() {
+        assertEquals("run.rs", Parts.inferName("fn run() -> i32 {\n    0\n}\n"))
     }
 
     @Test
-    fun `notes alone are enough`() {
-        assertEquals("main.go", suggestFileName("", "Build: go build -o app main.go"))
+    fun `main is not used as a file name twice`() {
+        assertEquals("main.py", Parts.inferName("def main():\n    pass\n"))
     }
 
     @Test
-    fun `unknown project falls back to an obviously generic name`() {
-        assertEquals("main.txt", suggestFileName("proj/\n└── README", ""))
+    fun `a requirements list names itself`() {
+        assertEquals("requirements.txt", Parts.inferName("flask==3.0.0\nrequests>=2.31\n"))
     }
 
     @Test
-    fun `placeholder header is replaced with the inferred name`() {
-        val parts = "=== paste_here.kt ===\nprint('hello')\n"
-        val fixed = renamePlaceholder(parts, "main.py")
-        assertEquals("=== main.py ===\nprint('hello')\n", fixed)
-        assertTrue(!fixed.contains("paste_here"))
+    fun `a dockerfile names itself`() {
+        assertEquals("Dockerfile", Parts.inferName("FROM alpine:3.20\nRUN apk add build-base\n"))
     }
 
     @Test
-    fun `real file headers are left alone`() {
-        val parts = "=== app.py ===\nfrom flask import Flask\n=== requirements.txt ===\nflask==3.0.0"
-        assertEquals(parts, renamePlaceholder(parts, "main.py"))
+    fun `an html document names itself`() {
+        assertEquals("index.html", Parts.inferName("<!DOCTYPE html>\n<html><body>hi</body></html>"))
+    }
+
+    @Test
+    fun `placeholder names are recognised`() {
+        assertTrue(Parts.isPlaceholder("paste_here.kt"))
+        assertTrue(Parts.isPlaceholder("untitled.py"))
+        assertFalse(Parts.isPlaceholder("app.py"))
+        assertFalse(Parts.isPlaceholder("core/VariableResolver.kt"))
+    }
+
+    @Test
+    fun `language detection separates kotlin from java and python`() {
+        assertEquals("kotlin", Parts.languageOf("package a.b\nfun main() { val x = 1 }"))
+        assertEquals("java", Parts.languageOf("import java.time.LocalDate;\npublic class A {}"))
+        assertEquals("python", Parts.languageOf("import os\nprint(os.getcwd())"))
     }
 }

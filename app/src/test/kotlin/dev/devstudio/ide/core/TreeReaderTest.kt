@@ -151,3 +151,76 @@ class TreeReaderTest {
         assertNotNull(TreeReader.parse("\u0000\u0001 random \u0000"))
     }
 }
+
+/**
+ * The gate that 0.16.1 was missing: a screenshot of *source code* must be refused
+ * as a tree. It reported "read 703 entries under val regex" — those 703 entries
+ * were lines of Kotlin, and the root was the first line of a function.
+ */
+class TreeReaderVerdictTest {
+
+    /** exactly the shape the user's screenshot produced */
+    private val code = """
+        val regex = "^" + Regex.escape(pattern)
+            .replace("(\\"|\" , " "), replace("^", "[A/]"*) + "$"
+        return Regex(regex).matches(path)
+        core/VariableResolver.kt
+        kotlin
+        package com.exam.le.idebot.core
+        import java.time.LocalDate
+        import java.time.LocalTime
+        val currentPath
+            .currentPath.substringAfterLast(' /').
+        "fileName"
+        ctx.currentPath
+        System.currentTimeMillis().toString(0,
+    """.trimIndent()
+
+    private val tree = """
+        myapp/
+        ├── app.py
+        ├── requirements.txt
+        └── templates/index.html
+    """.trimIndent()
+
+    @Test
+    fun `a screenshot of source code is refused, not planned`() {
+        val r = TreeReader.parse(code)
+        assertTrue("code was accepted as a tree", !r.ok)
+        assertTrue("no reason given", r.reason != null)
+        assertTrue("confidence should be low, was ${r.confidence}", r.confidence < 0.5f)
+        assertTrue("raw text must survive for the parts box", r.rawText.isNotBlank())
+    }
+
+    @Test
+    fun `a real tree is still accepted with high confidence`() {
+        val r = TreeReader.parse(tree)
+        assertTrue(r.ok)
+        assertEquals("myapp", r.root)
+        assertTrue("confidence too low: ${r.confidence}", r.confidence >= 0.5f)
+        assertEquals(null, r.reason)
+    }
+
+    @Test
+    fun `substituted connectors still nest`() {
+        val ocr = """
+            myapp/
+            |-- app.py
+            +-- requirements.txt
+            `-- templates/
+                |-- index.html
+        """.trimIndent()
+        val s = TreeReader.parse(ocr).structure
+        assertTrue(s.contains("index.html"))
+        val indent = s.lines().first { it.trim() == "index.html" }.length -
+            s.lines().first { it.trim() == "index.html" }.trimStart().length
+        assertTrue("index.html should be nested under templates/, was $indent", indent >= 8)
+    }
+
+    @Test
+    fun `glyph normalisation turns substitutes into real marks`() {
+        val fixed = TreeReader.normaliseGlyphs("  |-- src/")
+        assertTrue(fixed, fixed.contains("├──"))
+        assertEquals("src/", TreeReader.stripPrefix(fixed).first)
+    }
+}

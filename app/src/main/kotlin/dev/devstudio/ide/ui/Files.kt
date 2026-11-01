@@ -180,39 +180,20 @@ fun FilesScreen(ready: Boolean, onOpenInEditor: (String) -> Unit) {
     dialog?.let { kind ->
         val isRename = kind.startsWith("rename")
         val old = if (isRename) kind.substringAfter("|") else ""
-        AlertDialog(
-            onDismissRequest = { dialog = null },
-            containerColor = Pal.surface,
-            title = {
-                Text(
-                    when {
-                        isRename -> "Rename"
-                        kind == "dir" -> "New folder"
-                        else -> "New file"
-                    },
-                    color = Pal.text, fontSize = 15.sp, fontWeight = FontWeight.Bold
-                )
+        HkDialog(
+            title = when {
+                isRename -> "Rename"
+                kind == "dir" -> "New folder"
+                else -> "New file"
             },
-            text = {
-                BasicTextField(
-                    value = nameField, onValueChange = { nameField = it },
-                    textStyle = TextStyle(color = Pal.text, fontSize = 13.sp,
-                        fontFamily = FontFamily.Monospace),
-                    decorationBox = { inner ->
-                        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(Tok.rS))
-                            .background(Pal.surface2)
-                            .padding(horizontal = 10.dp, vertical = 10.dp)) {
-                            if (nameField.isEmpty()) Text("name", color = Pal.faint, fontSize = 13.sp)
-                            inner()
-                        }
-                    }
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val name = nameField.trim()
-                    dialog = null
-                    if (name.isEmpty()) return@TextButton
+            sub = if (root == 0) "in the guest" else "in the shared folder",
+            onDismiss = { dialog = null },
+            accent = Pal.cyan,
+            confirmLabel = if (isRename) "Rename" else "Create",
+            onConfirm = {
+                val name = nameField.trim()
+                dialog = null
+                if (name.isNotEmpty()) {
                     when {
                         isRename -> {
                             val dir = old.substringBeforeLast('/', "")
@@ -223,19 +204,24 @@ fun FilesScreen(ready: Boolean, onOpenInEditor: (String) -> Unit) {
                             }
                         }
                         kind == "dir" -> act("folder created") {
-                            if (root == 0) GuestFiles.mkdir(run, name) else SharedFiles.mkdir(ctx, name)
+                            if (root == 0) GuestFiles.mkdir(run, name)
+                            else SharedFiles.mkdir(ctx, name)
                         }
                         else -> act("file created") {
                             if (root == 0) GuestFiles.write(run, name, "")
                             else SharedFiles.write("${SharedFiles.DIR}/$name", "")
                         }
                     }
-                }) { Text(if (isRename) "Rename" else "Create", color = Pal.violet) }
-            },
-            dismissButton = {
-                TextButton(onClick = { dialog = null }) { Text("Cancel", color = Pal.dim) }
+                }
             }
-        )
+        ) {
+            HkField(nameField, { nameField = it }, hint = "name")
+            Text(
+                if (kind == "dir") "a folder inside the current root"
+                else "a file you can open in the editor right away",
+                color = Pal.faint, fontSize = 9.5.sp
+            )
+        }
     }
 }
 

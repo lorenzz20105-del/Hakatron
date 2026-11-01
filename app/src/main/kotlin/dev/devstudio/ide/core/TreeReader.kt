@@ -24,9 +24,20 @@ object TreeReader {
         val structure: String,
         val entries: Int,
         val root: String?,
-        val ignored: Int
+        val ignored: Int,
+        /** How sure we are that this is a tree and not a wall of source code. 0..1 */
+        val confidence: Float = 1f,
+        /** Why it was rejected, when it was. Null when it parsed cleanly. */
+        val reason: String? = null,
+        /** The raw OCR text, so the caller can offer it to the parts box instead. */
+        val rawText: String = ""
     ) {
-        val ok: Boolean get() = entries > 0
+        /**
+         * A tree needs *tree structure*: either box-drawing marks, or names that look
+         * like paths and folders. 703 lone tokens with no glyphs and no paths is a
+         * screenshot of code, and saying so is the whole point of this flag.
+         */
+        val ok: Boolean get() = entries > 0 && reason == null
     }
 
     // box drawing + the characters OCR commonly substitutes for them
@@ -68,20 +79,67 @@ object TreeReader {
     private fun hasMark(raw: String): Boolean = raw.any { isStructure(it) }
 
     /**
+     * OCR rarely renders a box connector as itself. The common substitutes are `|--`, `+--`,
+     * `` `-- ``, `|__` and a bare `- `; they all mean the same thing, so they are
+     * normalised to the canonical marks *before* depth is counted. Without this a
+     * whole screenshot comes back one level deep.
+     */
+    fun normaliseGlyphs(raw: String): String {
+        var line = raw.replace("\u00A0", " ")
+        // a leading connector built from substitutes: |-- +-- `-- |__ +__ I-- L__
+        line = Regex("^(\\s*)[|+`:IL│][-_=–—]{2,}").replace(line) { m ->
+            m.groupValues[1] + "├──"
+        }
+        // a lone `- ` or `* ` used as a bullet at the start of an indented line
+        line = Regex("^(\\s{2,})[-*.]\\s+").replace(line) { m ->
+            m.groupValues[1] + "├── "
+        }
+        return line
+    }
+
+    /**
      * Prose and OCR furniture must never become files. A tree entry is one of:
      * a folder (`x/`), a path (`a/b.kt`), a file (`a.kt`), or a single bare token
      * (`Makefile`). "Project Tree", "Copy", "Thought for 6 seconds" are none of
      * those — they are words with no path in them.
      */
     private fun isNoise(name: String): Boolean {
-        val n = name.trim()
+        // `res/values/{strings.xml, themes.xml}` — the space after the comma is
+        // layout, not a separator; squashing it keeps the entry (and brace
+        // expansion trims it back out again).
+        val n = name.trim().let { if (it.contains('{') && it.contains('}')) it.replace(" ", "") else it }
         if (n.isEmpty()) return true
         if (n.startsWith("```") || n.equals("text", true) || n.equals("copy", true)) return true
         if (n.startsWith("#") && !n.contains(".")) return true
         if (n == "." || n == "..") return true
         if (n.contains(' ') && !n.contains('/') && !n.contains('.') && !n.endsWith("/")) return true
         if (n.contains(':') && !n.contains('/')) return true
+        if (isCode(n)) return true
         return n.count { it.isLetter() } == 0
+    }
+
+    /**
+     * Source lines are not file names. OCR of a code screenshot produced 703
+     * "entries" like `val regex = "^" + Regex.escape(pattern)/` and a root called
+     * `val regex`; these checks are what stop that from ever reaching the planner.
+     */
+    private fun isCode(n: String): Boolean {
+        val t = n.trim()
+        // `res/values/{strings.xml, themes.xml}` is a real tree entry with braces in
+        // it, not a code block — brace expansion happens after this filter.
+        if (Regex("^[\\w./@+{},-]+/?$").matches(t) && (t.contains('/') || t.contains('.'))) return false
+        if (t.contains('=') && !t.endsWith("=")) return true                 // assignments, ==, =>
+        if (t.contains('(') || t.contains(')') || t.contains('{') || t.contains('}')) return true
+        if (t.contains(';') || t.contains('"') || t.contains('`')) return true
+        if (t.contains("->") || t.contains("&&") || t.contains("||") || t.contains("::")) return true
+        if (t.startsWith("//") || t.startsWith("/*") || t.startsWith("*")) return true
+        if (t.startsWith("import ") || t.startsWith("from ") || t.startsWith("package ")) return true
+        if (t.startsWith("return ") || t.startsWith("print") || t.startsWith("echo ")) return true
+        if (Regex("^(val|var|fun|def|class|const|let|public|private|static|if|for|while|else|try|catch|end)\b")
+                .containsMatchIn(t)) return true
+        if (t.endsWith(",") || t.endsWith(":") || t.endsWith(")") || t.endsWith(";")) return true
+        // a lone token with no separator is fine (Makefile), a sentence is not
+        return t.split(' ').size > 4
     }
 
     /**
@@ -100,6 +158,22 @@ object TreeReader {
         if (head.isNotEmpty()) out.add(head.trimEnd('/') + "/" to 0)
         parts.forEach { out.add(it + tail to 1) }
         return out
+    }
+
+    /** A real name: `app.py`, `src/`, `com/example/App.kt`, `Makefile`. */
+    fun looksLikeFileName(name: String): Boolean {
+        val n = name.trim()
+        if (n.isEmpty()) return false
+        if (n.endsWith("/")) return true
+        val leaf = n.substringAfterLast('/')
+        if (leaf.isEmpty() || leaf.contains(' ')) return false
+        if (Regex("^[\\w.-]+\\.[A-Za-z0-9]{1,10}$").matches(leaf)) return true
+        // extensionless but clearly a path or a known build file
+        if (n.contains('/') && Regex("^[\\w.-]+$").matches(leaf)) return true
+        return leaf in setOf(
+            "Makefile", "Dockerfile", "Gemfile", "Rakefile", "LICENSE", "README",
+            "Procfile", "Cargo", "gradlew"
+        )
     }
 
     private fun isDir(name: String): Boolean {
@@ -128,7 +202,7 @@ object TreeReader {
         val kept = ArrayList<Entry>()
         var ignored = 0
         for (l in lines) {
-            val raw = l.text.replace("\u00A0", " ").trimEnd()
+            val raw = normaliseGlyphs(l.text).trimEnd()
             if (raw.isBlank()) continue
             val (name0, marks) = stripPrefix(raw)
             val name = name0
@@ -177,7 +251,32 @@ object TreeReader {
         }
         val root = kept.getOrNull(rootIdx)?.name?.trimEnd('/')
         val head = if (root != null) root + "/\n" else ""
-        return Result(head + out.joinToString("\n"), entries, root, ignored)
+        val structure = head + out.joinToString("\n")
+
+        // ---- is this really a tree?
+        //
+        // A tree has two independent tells: box characters drawn on the lines, or
+        // names that are actually file/folder names. Source code has neither — it
+        // is one long name-like line ("core/VariableResolver.kt") surrounded by
+        // statements, which is exactly the OCR that produced 703 fake entries.
+        val marked = kept.count { hasMark(it.raw) }
+        val total = kept.size.coerceAtLeast(1)
+        val fileish = kept.count { looksLikeFileName(it.name) }
+        val markedShare = marked.toFloat() / total
+        val fileShare = fileish.toFloat() / total
+        val looksLikeTree = marked >= maxOf(1, total / 3) ||
+            (total >= 2 && fileShare >= 0.6f)
+        val confidence = (markedShare * 0.6f + fileShare * 0.4f).coerceIn(0f, 1f)
+        val raw = lines.joinToString("\n") { it.text }
+        val reason = when {
+            entries == 0 -> "no project tree found in that image"
+            entries > 2000 -> "that image produced $entries entries — too flat to be a tree"
+            !looksLikeTree ->
+                "that image is not a project tree — ${kept.size} lines, $marked drawn as a tree, " +
+                    "$fileish that look like file names"
+            else -> null
+        }
+        return Result(structure, entries, root, ignored, confidence, reason, raw)
     }
 
     /** Pasted text (no pixel data): depth comes from the glyphs and the indent. */

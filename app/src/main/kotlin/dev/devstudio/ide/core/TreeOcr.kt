@@ -51,7 +51,7 @@ object TreeOcr {
             val res = out.getOrNull()
             val err = out.exceptionOrNull()?.let { it.message ?: "could not read that image" }
             main.post {
-                if (res != null) onResult(res, if (res.ok) null else "no project tree found in that image")
+                if (res != null) onResult(res, if (res.ok) null else res.reason)
                 else onResult(null, err ?: "could not read that image")
             }
         }.start()

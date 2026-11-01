@@ -373,3 +373,112 @@ fun levelColour(level: String): Color = when (level) {
     "cmd" -> Pal.cyan
     else -> Pal.dim
 }
+
+/* ------------------------------------------------------------------ dialogs */
+
+/**
+ * HkDialog — the only dialog shape in the app.
+ *
+ * Material's default `AlertDialog` (square-ish corners, 24 dp padding, flat
+ * surface, text buttons) was the last piece of the old look still visible on
+ * every screen, because every screen opens a dialog. This keeps one shape, one
+ * tonal surface and one button hierarchy, so a prompt feels like part of the app
+ * rather than a system widget on top of it.
+ */
+@Composable
+fun HkDialog(
+    title: String,
+    sub: String? = null,
+    onDismiss: () -> Unit,
+    accent: Color = Pal.violet,
+    confirmLabel: String = "OK",
+    dismissLabel: String? = "Cancel",
+    confirmTone: Color = Pal.violet,
+    onConfirm: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit = {}
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(Tok.rXL),
+        containerColor = Pal.surface,
+        tonalElevation = 0.dp,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(width = 3.dp, height = 18.dp)
+                        .background(Brush.verticalGradient(listOf(accent, accent.copy(alpha = 0.2f))),
+                            RoundedCornerShape(3.dp))
+                )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text(title, color = Pal.text, fontSize = 15.sp, fontWeight = FontWeight.Black)
+                    sub?.let { Text(it, color = Pal.faint, fontSize = 9.5.sp, maxLines = 2) }
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
+        },
+        confirmButton = {
+            Pressable(onClick = onConfirm, scaleDown = 0.96f) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(50)).background(confirmTone)
+                        .padding(horizontal = 18.dp, vertical = 9.dp)
+                ) {
+                    Text(confirmLabel, color = Pal.ink, fontSize = 12.sp, fontWeight = FontWeight.Black)
+                }
+            }
+        },
+        dismissButton = if (dismissLabel == null) null else {
+            {
+                Pressable(onClick = onDismiss, scaleDown = 0.96f) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(50)).background(Pal.surface2)
+                            .padding(horizontal = 16.dp, vertical = 9.dp)
+                    ) { Text(dismissLabel, color = Pal.dim, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+        }
+    )
+}
+
+/** The app's one text field: kit corners, ink well, monospace optional. */
+@Composable
+fun HkField(
+    value: String,
+    onChange: (String) -> Unit,
+    hint: String = "",
+    mono: Boolean = true,
+    singleLine: Boolean = true,
+    minLines: Int = 1,
+    maxLines: Int = if (singleLine) 1 else 12,
+    modifier: Modifier = Modifier
+) {
+    androidx.compose.foundation.text.BasicTextField(
+        value = value,
+        onValueChange = onChange,
+        singleLine = singleLine,
+        minLines = minLines,
+        maxLines = maxLines,
+        textStyle = androidx.compose.ui.text.TextStyle(
+            color = Pal.text,
+            fontSize = if (mono) 11.5.sp else 13.sp,
+            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default
+        ),
+        cursorBrush = androidx.compose.ui.graphics.SolidColor(Pal.violet),
+        modifier = modifier.fillMaxWidth(),
+        decorationBox = { inner ->
+            Box(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(Tok.rS))
+                    .background(Pal.ink)
+                    .border(1.dp, Pal.line, RoundedCornerShape(Tok.rS))
+                    .padding(horizontal = 11.dp, vertical = 9.dp)
+            ) {
+                if (value.isEmpty() && hint.isNotEmpty())
+                    Text(hint, color = Pal.faint, fontSize = 10.5.sp,
+                        fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default)
+                inner()
+            }
+        }
+    )
+}

@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.devstudio.ide.Engine
 import dev.devstudio.ide.core.Analyzer
+import dev.devstudio.ide.core.Parts
 import dev.devstudio.ide.core.Planner
 import dev.devstudio.ide.core.Store
 import dev.devstudio.ide.core.TreeOcr
@@ -91,20 +92,29 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
             if (res != null && res.ok) {
                 structure = res.structure
                 ocrNote = "read ${res.entries} entries" + (res.root?.let { " under $it" } ?: "") +
-                    " — check the tree, then paste the code"
+                    " · ${(res.confidence * 100).toInt()}% sure it is a tree — check it"
             } else {
-                ocrNote = err ?: "could not read that image"
+                // A screenshot of source code is not a tree, but it *is* the parts.
+                val recovered = res?.rawText?.takeIf { it.isNotBlank() }?.let { Parts.split(it) }
+                if (recovered != null && recovered.count > 0) {
+                    parts = recovered.toText()
+                    ocrNote = "that image was code, not a tree — moved it into the parts as " +
+                        "${recovered.count} file(s): ${recovered.files.joinToString(", ")}"
+                } else {
+                    ocrNote = err ?: "could not read that image"
+                }
             }
         }
     }
 
-    // A part header must name a real file. "=== paste_here.kt ===" produced a plan
-    // for a Kotlin project out of Python source, so the name is inferred instead.
-    val suggestName = remember(structure, notes) { suggestFileName(structure, notes) }
-    val fixedParts = remember(parts, suggestName) { renamePlaceholder(parts, suggestName) }
+    // Every paste is split into the files it contains — 0.16.1 put the whole project
+    // in one `=== paste_here.kt ===` block, which is why the plan was nonsense.
+    val split = remember(parts, structure) { Parts.split(parts) }
+    val fixedParts = remember(parts, split) { if (split.count > 0) split.toText() else parts }
 
     fun analyze() {
-        val body = fixedParts
+        // accept the split on the way in, so what the planner sees is what is shown
+        val body = if (split.count > 0) split.toText() else parts
         if (body != parts) parts = body
         plan = planner.plan("project", structure, body, notes)
         log = emptyList()
@@ -223,9 +233,11 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                             Spacer(Modifier.height(9.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Pressable(onClick = {
-                                    val body = structure.trim()
-                                    parts = (if (parts.isBlank()) "" else parts.trimEnd() + "\n") +
-                                        "=== " + suggestName + " ===\n" + body
+                                    // split it: a screenshot of code is several files,
+                                    // not one blob with an invented header
+                                    val moved = Parts.split(structure.trim())
+                                    val text = if (moved.count > 0) moved.toText() else structure.trim()
+                                    parts = (if (parts.isBlank()) "" else parts.trimEnd() + "\n\n") + text
                                     structure = ""
                                 }) {
                                     Box(Modifier.clip(RoundedCornerShape(Tok.rS))
@@ -244,12 +256,49 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
 
                 SectionLabel("2 · THE PARTS")
                 PasteField(fixedParts, { parts = it }, 7,
-                    "=== app.py ===\nfrom flask import Flask\n...\n=== requirements.txt ===\nflask==3.0.0")
-                Text(
-                    "File by file, or the whole project with === path === headers. " +
-                        "Suggested name for a bare paste: $suggestName.",
-                    color = Pal.faint, fontSize = 9.5.sp
-                )
+                    "Paste one file, several files, or a whole project — it is split for you.")
+
+                // What the splitter found, shown before anything is planned.
+                Row(Modifier.fillMaxWidth().padding(top = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    StatusPill(
+                        when (split.count) {
+                            0 -> "no code yet"
+                            1 -> "1 file"
+                            else -> "${split.count} files"
+                        },
+                        if (split.count > 1) Pal.mint else Pal.faint,
+                        filled = split.count > 1
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        if (split.count == 0) "paste code below and the files appear here"
+                        else split.files.joinToString(" · "),
+                        color = Pal.dim, fontSize = 9.5.sp, maxLines = 2,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (split.count > 1 || (split.count == 1 && split.parts[0].inferred)) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        if (split.toText() != parts) {
+                            Pressable(onClick = { parts = split.toText() }, scaleDown = 0.95f) {
+                                Box(Modifier.clip(RoundedCornerShape(50)).background(Pal.violetSoft)
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                    Text("Write the ${split.count} file header(s)",
+                                        color = Pal.violet, fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                        Text(
+                            if (split.headerCount == 0) "names inferred from the code"
+                            else "${split.headerCount} header(s) found",
+                            color = Pal.faint, fontSize = 9.sp,
+                            modifier = Modifier.align(Alignment.CenterVertically)
+                        )
+                    }
+                }
 
                 SectionLabel("3 · BUILD NOTES (optional but powerful)")
                 PasteField(notes, { notes = it }, 5,
@@ -521,46 +570,14 @@ private fun SectionLabel(text: String) {
 
 @Composable
 private fun PasteField(value: String, onChange: (String) -> Unit, lines: Int, hint: String) {
-    OutlinedTextField(
-        value = value, onValueChange = onChange,
-        placeholder = {
-            Text(hint, color = Pal.faint, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-        },
-        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace, color = Pal.text),
-        minLines = lines, maxLines = lines + 6,
-        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None,
-            imeAction = ImeAction.Default),
-        modifier = Modifier.fillMaxWidth(),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Pal.violet, unfocusedBorderColor = Pal.line,
-            focusedContainerColor = Pal.ink, unfocusedContainerColor = Pal.ink)
+    // one field shape for the whole app — see Kit.kt
+    HkField(
+        value = value,
+        onChange = onChange,
+        hint = hint,
+        mono = true,
+        singleLine = false,
+        minLines = lines,
+        maxLines = lines + 8
     )
 }
-
-/* ----------------------------------------------------------- name inference */
-
-/**
- * Picks a plausible file name for pasted source by looking at the tree and the
- * notes. Falls back to `main.txt` — a name that is obviously a placeholder rather
- * than one that wrongly implies a language.
- */
-internal fun suggestFileName(structure: String, notes: String): String {
-    // Source languages win over manifests: a Rust project has Cargo.toml *and*
-    // src/main.rs, and the name we want is the one that compiles.
-    val source = listOf(
-        "swift", "java", "cpp", "hpp", "php", "rs", "py", "cc", "cs", "go", "kt",
-        "js", "ts", "rb", "sh", "lua", "pl", "c", "h"
-    )
-    val config = listOf("html", "json", "yaml", "toml", "css")
-    val haystack = structure + " " + notes
-    for (tier in listOf(source, config)) {
-        val hit = Regex("[.](" + tier.joinToString("|") + ")").find(haystack)
-        if (hit != null) return "main." + hit.groupValues[1]
-    }
-    return "main.txt"
-}
-
-/** Replaces a bare `=== paste_here.kt ===` header with a name that fits the project. */
-internal fun renamePlaceholder(parts: String, name: String): String =
-    Regex("===[ \t]*paste_here[.][A-Za-z0-9]+[ \t]*===").replace(parts, "=== $name ===")

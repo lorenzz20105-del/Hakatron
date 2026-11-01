@@ -38,6 +38,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.devstudio.ide.core.ShellSession
 import dev.devstudio.ide.core.VtScreen
+import androidx.compose.ui.draw.clip
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
 /**
@@ -64,6 +66,7 @@ fun TerminalScreen(ready: Boolean) {
     var dead by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
 
     // start once, and again whenever the user asks for a fresh shell
     LaunchedEffect(ready, tick) {
@@ -103,58 +106,88 @@ fun TerminalScreen(ready: Boolean) {
     fun send1(text: String) { session?.write(text) }
 
     Column(Modifier.fillMaxSize().background(Pal.ink)) {
+
         // ------------------------------------------------------------- header
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Dot(if (dead) Red else if (ready) Color(0xFF5BD48A) else Amber)
-            Spacer(Modifier.width(8.dp))
-            Text(
-                when {
-                    !ready -> "engine not set up"
-                    dead -> "shell exited"
-                    else -> title
-                },
-                color = if (dead) Red else Dim, fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace, maxLines = 1,
-                modifier = Modifier.weight(1f, fill = false)
-            )
-            Spacer(Modifier.width(8.dp))
-            // Truthful about what this shell actually is: which userland, and
-            // whether it got a real pty. Never a vague "terminal ready" chip.
-            if (ready) {
-                val land = session?.userland ?: "alpine"
-                StatusPill(land + " · " + (if (land == "termux") "native" else "proot"),
-                    if (land == "termux") Cyan else Dim)
-                Spacer(Modifier.width(5.dp))
-                StatusPill(if (mode == "pty") "pty" else "pipes",
-                    if (mode == "pty") Green else Amber, filled = true)
-                Spacer(Modifier.width(6.dp))
+        Row(
+            Modifier.fillMaxWidth().padding(start = 13.dp, end = 8.dp, top = 9.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // a live dot: green while the shell is alive, rose when it exits
+            Box(
+                Modifier.size(30.dp).clip(RoundedCornerShape(10.dp))
+                    .background(
+                        when {
+                            !ready -> Pal.surface3
+                            dead -> Pal.roseSoft
+                            else -> Pal.mintSoft
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) { Text("❯", color = when { !ready -> Pal.faint; dead -> Pal.rose; else -> Pal.mint },
+                fontSize = 13.sp, fontWeight = FontWeight.Black) }
+            Spacer(Modifier.width(9.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    when {
+                        !ready -> "Shell"
+                        dead -> "shell exited"
+                        else -> title.ifBlank { "shell" }
+                    },
+                    color = Pal.text, fontSize = 14.sp, fontWeight = FontWeight.Black, maxLines = 1
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val land = session?.userland ?: "alpine"
+                    Text(
+                        when {
+                            !ready -> "engine not set up"
+                            land == "termux" -> "termux · native binaries"
+                            else -> "alpine · proot guest"
+                        },
+                        color = Pal.faint, fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace, maxLines = 1
+                    )
+                }
             }
+            // truthful chips: which userland, and pty vs pipes
+            if (ready) {
+                StatusPill(if (mode == "pty") "pty" else "pipes",
+                    if (mode == "pty") Pal.mint else Pal.amber, filled = true)
+                Spacer(Modifier.width(5.dp))
+                StatusPill(if (dead) "exited" else "live",
+                    if (dead) Pal.rose else Pal.mint)
+            }
+        }
+
+        // toolbar: font, follow-tail, restart — the three things you actually touch
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TermAction("A-") { fontSize = (fontSize - 1f).coerceIn(8f, 20f) }
+            Spacer(Modifier.width(5.dp))
+            TermAction("A+") { fontSize = (fontSize + 1f).coerceIn(8f, 20f) }
+            Spacer(Modifier.width(5.dp))
+            TermAction(if (autoScroll) "follow on" else "follow off",
+                if (autoScroll) Pal.mint else Pal.faint) { autoScroll = !autoScroll }
             Spacer(Modifier.weight(1f))
-            Text("A-", color = Dim, fontSize = 11.sp, modifier = Modifier.clickable {
-                fontSize = (fontSize - 1f).coerceIn(8f, 18f)
-            })
-            Text("A+", color = Dim, fontSize = 11.sp,
-                modifier = Modifier.padding(start = 10.dp).clickable {
-                    fontSize = (fontSize + 1f).coerceIn(8f, 18f)
-                })
-            Text(if (autoScroll) "⇣ on" else "⇣ off", color = if (autoScroll) Cyan else Dim,
-                fontSize = 10.sp, modifier = Modifier.padding(start = 12.dp).clickable { autoScroll = !autoScroll })
-            Text("↻", color = Dim, fontSize = 13.sp,
-                modifier = Modifier.padding(start = 12.dp).clickable {
-                    session?.close(); dead = false; tick++
-                })
+            TermAction(if (dead) "restart" else "restart", Pal.cyan) {
+                session?.close(); dead = false; tick++
+            }
         }
 
         if (!ready) {
-            Column(Modifier.weight(1f).fillMaxWidth().padding(24.dp),
-                verticalArrangement = Arrangement.Center) {
-                Text("The terminal runs inside the built-in Alpine guest.",
-                    color = Txt, fontSize = 13.sp)
+            Column(
+                Modifier.weight(1f).fillMaxWidth().padding(26.dp),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text("The shell runs inside the built-in Linux guest.",
+                    color = Pal.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Text("Set the engine up in System → and come back: it needs ~600 MB free, " +
-                    "then this screen gives you a real pty, a real shell and a real kernel view.",
-                    color = Dim, fontSize = 11.sp, lineHeight = 16.sp)
+                Text(
+                    "Set the engine up in System and come back: you get a real pty, a real shell " +
+                        "and a real kernel view, with nothing installed outside this app.",
+                    color = Pal.faint, fontSize = 11.sp, lineHeight = 16.sp
+                )
             }
             return@Column
         }
@@ -162,9 +195,15 @@ fun TerminalScreen(ready: Boolean) {
         // --------------------------------------------------------------- grid
         Box(
             Modifier.weight(1f).fillMaxWidth()
-                .pointerInput(Unit) { detectTapGestures { runCatching { focus.requestFocus() }; keyboard?.show() } }
+                .pointerInput(Unit) {
+                    detectTapGestures {
+                        runCatching { focus.requestFocus() }
+                        keyboard?.show()
+                    }
+                }
         ) {
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 6.dp)) {
+            LazyColumn(state = listState,
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
                 items(lines) { line ->
                     Text(
                         renderLine(line),
@@ -174,10 +213,23 @@ fun TerminalScreen(ready: Boolean) {
                         softWrap = false,
                         modifier = Modifier
                             .background(backgroundColorOf(line))
-                            .padding(horizontal = 2.dp)
+                            .padding(horizontal = 1.dp)
                     )
                 }
-                item { Spacer(Modifier.height(4.dp)) }
+                item { Spacer(Modifier.height(6.dp)) }
+            }
+            // jump to the bottom when you have scrolled away and output arrived
+            if (!autoScroll) {
+                Box(
+                    Modifier.align(Alignment.BottomEnd).padding(10.dp)
+                        .clip(RoundedCornerShape(50)).background(Pal.violet)
+                        .clickable {
+                            autoScroll = true
+                            scope.launch { runCatching { listState.scrollToItem(
+                                (lines.size - 1).coerceAtLeast(0)) } }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                ) { Text("↓ latest", color = Pal.ink, fontSize = 10.sp, fontWeight = FontWeight.Black) }
             }
         }
 
@@ -185,7 +237,6 @@ fun TerminalScreen(ready: Boolean) {
         BasicTextField(
             value = "",
             onValueChange = { typed ->
-                // The IME hands us composed text; a terminal wants keystrokes.
                 typed.forEach { ch ->
                     when (ch) {
                         '\n' -> send1("\r")
@@ -211,64 +262,85 @@ fun TerminalScreen(ready: Boolean) {
             modifier = Modifier.height(1.dp).fillMaxWidth().focusRequester(focus)
         )
 
-        // -------------------------------------------------------- extra keys
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-            .background(Pal.ink)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            KeyCap("CTRL", active = ctrl) { ctrl = !ctrl }
-            KeyCap("ESC", Amber) { session?.esc(); ctrl = false }
-            KeyCap("TAB") { session?.tab() }
-            KeyCap("^C", Red) { session?.interrupt() }
-            KeyCap("^D", Red) { session?.eof() }
-            KeyCap("↑") { session?.arrow(true) }
-            KeyCap("↓") { session?.arrow(false) }
-            KeyCap("←") { session?.arrowLR(false) }
-            KeyCap("→") { session?.arrowLR(true) }
-            KeyCap("|") { send1("|") }
-            KeyCap("-") { send1("-") }
-            KeyCap("/") { send1("/") }
-            KeyCap("~") { send1("~") }
-            KeyCap("$") { send1("$") }
-            KeyCap("\"") { send1("\"") }
-            KeyCap("'") { send1("'") }
-            KeyCap("⏎", Green) { send1("\r") }
+        // ------------------------------------------------------- extra keys
+        Column(Modifier.fillMaxWidth().background(Pal.surface)) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Pal.lineSoft))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                KeyCap("CTRL", Pal.violet, active = ctrl) { ctrl = !ctrl }
+                KeyCap("ESC", Pal.amber) { session?.esc(); ctrl = false }
+                KeyCap("TAB") { session?.tab() }
+                KeyCap("^C", Pal.rose) { session?.interrupt() }
+                KeyCap("^D", Pal.rose) { session?.eof() }
+                KeyCap("↑") { session?.arrow(true) }
+                KeyCap("↓") { session?.arrow(false) }
+                KeyCap("←") { session?.arrowLR(false) }
+                KeyCap("→") { session?.arrowLR(true) }
+                KeyCap("|") { send1("|") }
+                KeyCap("-") { send1("-") }
+                KeyCap("/") { send1("/") }
+                KeyCap("~") { send1("~") }
+                KeyCap("$") { send1("$") }
+                KeyCap("\"") { send1("\"") }
+                KeyCap("'") { send1("'") }
+                KeyCap("⏎", Pal.mint) { send1("\r") }
+            }
         }
 
-        // ------------------------------------------------- quick commands row
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // ---------------------------------------------------- quick commands
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                .background(Pal.ink).padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             listOf("ls -la", "pwd", "cat /etc/os-release", "df -h /", "apk update",
                 "python3 -V", "top", "clear").forEach { q ->
-                Box(Modifier.background(Surf, RoundedCornerShape(7.dp))
-                    .border(1.dp, LineC, RoundedCornerShape(7.dp))
-                    .clickable { send1(q + "\r") }
-                    .padding(horizontal = 8.dp, vertical = 5.dp)) {
-                    Text(q, color = Dim, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Pressable(onClick = { send1(q + "\r") }, scaleDown = 0.94f) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(50)).background(Pal.surface2)
+                            .border(1.dp, Pal.lineSoft, RoundedCornerShape(50))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(q, color = Pal.dim, fontSize = 9.5.sp, fontFamily = FontFamily.Monospace)
+                    }
                 }
             }
         }
     }
 }
 
+/** A small toolbar button in the terminal header. */
+@Composable
+private fun TermAction(label: String, tone: Color = Pal.dim, onClick: () -> Unit) {
+    Pressable(onClick = onClick, scaleDown = 0.93f) {
+        Box(
+            Modifier.clip(RoundedCornerShape(50)).background(tone.copy(alpha = 0.12f))
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+        ) { Text(label, color = tone, fontSize = 9.5.sp, fontWeight = FontWeight.Bold) }
+    }
+}
+
 /** One key of the extra-keys row — a real button, so it can hold "armed" state. */
 @Composable
-private fun KeyCap(label: String, colour: Color = Dim, active: Boolean = false, onTap: () -> Unit) {
-    Box(
-        Modifier
-            .background(if (active) Violet else Color(0xFF161922), RoundedCornerShape(6.dp))
-            .border(1.dp, if (active) Violet else LineC, RoundedCornerShape(6.dp))
-            .clickable { onTap() }
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-    ) {
-        Text(
-            label,
-            color = if (active) Color.White else colour,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
-        )
+private fun KeyCap(label: String, tone: Color = Pal.dim, active: Boolean = false, onTap: () -> Unit) {
+    Pressable(onClick = onTap, scaleDown = 0.9f) {
+        Box(
+            Modifier.clip(RoundedCornerShape(8.dp))
+                .background(if (active) tone else Pal.surface2)
+                .border(1.dp, if (active) tone else Pal.lineSoft, RoundedCornerShape(8.dp))
+                .padding(horizontal = 9.dp, vertical = 7.dp)
+        ) {
+            Text(
+                label,
+                color = if (active) Pal.ink else tone,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = if (active) FontWeight.Black else FontWeight.Normal
+            )
+        }
     }
 }
 

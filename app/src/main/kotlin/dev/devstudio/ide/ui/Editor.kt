@@ -18,6 +18,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
@@ -114,6 +116,10 @@ object GuestFiles {
 
 private const val LINE_H = 19f
 
+/** The writing surface: one shade below the ink, so the text reads as a page. */
+private val EditorSurface = Color(0xFF0A0C12)
+private val GutterText = Color(0xFF3D4557)
+
 /* ------------------------------------------------------------- code editor */
 
 @Composable
@@ -143,6 +149,8 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
     val drafts = remember { HashMap<String, TextFieldValue>() }
     val savedText = remember { HashMap<String, String>() }
     var confirmClose by remember { mutableStateOf<String?>(null) }
+    // -1 closed · 0 problems · 1 output
+    var panelTab by remember { mutableStateOf(-1) }
     val undoStack = remember { ArrayDeque<TextFieldValue>() }
     val redoStack = remember { ArrayDeque<TextFieldValue>() }
 
@@ -288,44 +296,87 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
         store.setEditorActive(active)
     }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
+    Column(Modifier.fillMaxSize().background(Pal.ink)) {
 
-        // ---------------------------------------------------------- top bar
-        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically) {
+        // ------------------------------------------------------------- header
+        Row(
+            Modifier.fillMaxWidth().padding(start = 13.dp, end = 8.dp, top = 9.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(width = 4.dp, height = 26.dp).background(
+                    Brush.verticalGradient(listOf(Pal.violet, Pal.violet.copy(alpha = 0.2f))),
+                    RoundedCornerShape(4.dp))
+            )
+            Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
-                Text(Highlighter.titleOf(active ?: "Code"), color = Txt, fontSize = 15.sp,
-                    fontWeight = FontWeight.Black, maxLines = 1)
-                Text(active ?: "no file open", color = Dim, fontSize = 9.5.sp,
-                    fontFamily = FontFamily.Monospace, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(Highlighter.titleOf(active ?: "Editor"), color = Pal.text,
+                        fontSize = 16.sp, fontWeight = FontWeight.Black,
+                        letterSpacing = (-0.2).sp, maxLines = 1)
+                    if (active != null) {
+                        Spacer(Modifier.width(6.dp))
+                        StatusPill(if (dirty) "modified" else "saved",
+                            if (dirty) Pal.amber else Pal.mint, filled = dirty)
+                    }
+                }
+                Text(active?.substringBeforeLast('/', "") ?: "no file open",
+                    color = Pal.faint, fontSize = 9.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
             }
-            IconText("Files") { showFiles = !showFiles; refresh() }
-            IconText("Find") { showFind = true }
-            IconText("Git") { showGit = true }
-            IconText("＋") { showNew = true }
+            EditorPill("▤", if (showFiles) Pal.cyan else Pal.dim) { showFiles = !showFiles; refresh() }
+            Spacer(Modifier.width(5.dp))
+            EditorPill("⌕", Pal.dim) { showFind = true }
+            Spacer(Modifier.width(5.dp))
+            EditorPill("⑂", Pal.dim) { showGit = true }
+            Spacer(Modifier.width(5.dp))
+            EditorPill("＋", Pal.violet) { showNew = true }
         }
 
-        // tabs
+        // tabs — pill chips; the active one carries the accent and a dirty dot
         if (tabs.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                tabs.forEach { p ->
-                    val on = p == active
-                    Surface(shape = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp), color = if (on) Surf2 else Bg,
-                        border = if (on) BorderStroke(1.dp, Violet) else null,
-                        modifier = Modifier.clickable { open(p) }) {
-                        Row(Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            val mark = if (on) dirty
-                            else drafts[p]?.text?.let { it != (savedText[p] ?: it) } ?: false
-                            Text(Highlighter.titleOf(p) + if (mark) " •" else "",
-                                color = if (on) Txt else Dim, fontSize = 10.5.sp)
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                tabs.forEach { path ->
+                    val on = path == active
+                    val unsaved = if (on) dirty
+                    else drafts[path]?.text?.let { it != (savedText[path] ?: it) } ?: false
+                    Pressable(onClick = { open(path) }, scaleDown = 0.95f) {
+                        Row(
+                            Modifier.clip(RoundedCornerShape(50))
+                                .background(if (on) Pal.violetSoft else Pal.surface)
+                                .border(
+                                    if (on) 1.dp else 0.dp,
+                                    if (on) Pal.violet.copy(alpha = 0.5f) else Color.Transparent,
+                                    RoundedCornerShape(50)
+                                )
+                                .padding(start = 10.dp, end = if (on) 6.dp else 10.dp,
+                                    top = 5.dp, bottom = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (unsaved) {
+                                Box(Modifier.size(5.dp).clip(RoundedCornerShape(50))
+                                    .background(Pal.amber))
+                                Spacer(Modifier.width(5.dp))
+                            }
+                            Text(Highlighter.titleOf(path),
+                                color = if (on) Pal.text else Pal.dim,
+                                fontSize = 10.5.sp,
+                                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                maxLines = 1)
                             if (on) {
-                                Spacer(Modifier.width(7.dp))
-                                Text("×", color = Dim, fontSize = 12.sp, modifier = Modifier.clickable {
-                                    val unsaved = drafts[p]?.text?.let { it != (savedText[p] ?: it) } ?: false
-                                    if (unsaved) confirmClose = p else closeTab(p)
-                                })
+                                Spacer(Modifier.width(6.dp))
+                                Box(
+                                    Modifier.size(16.dp).clip(RoundedCornerShape(50))
+                                        .clickable {
+                                            val dirtyTab = drafts[path]?.text
+                                                ?.let { it != (savedText[path] ?: it) } ?: false
+                                            if (dirtyTab) confirmClose = path else closeTab(path)
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) { Text("×", color = Pal.dim, fontSize = 12.sp) }
                             }
                         }
                     }
@@ -333,30 +384,82 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             }
         }
 
-        // -------------------------------------------------------- file sheet
+        // ----------------------------------------------------------- explorer
+        //
+        // The old "Files" sheet was a flat list under a search box. This is the
+        // panel an editor actually has: a header with a new-file button, indented
+        // paths so folder depth is visible, and the open file marked.
         if (showFiles) {
-            Surface(color = Surf, shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp).heightIn(max = 230.dp)) {
+            TCard(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                tone = Pal.surface, radius = Tok.rM, glow = Pal.cyan
+            ) {
                 Column {
-                    OutlinedTextField(search, { search = it }, modifier = Modifier.fillMaxWidth().padding(8.dp),
-                        placeholder = { Text("find file…", color = Dim, fontSize = 11.sp) },
-                        singleLine = true,
-                        textStyle = TextStyle(fontSize = 12.sp, color = Txt),
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Violet,
-                            unfocusedBorderColor = LineC))
-                    LazyColumn(Modifier.padding(bottom = 6.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 11.dp, end = 8.dp, top = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("EXPLORER", color = Pal.faint, fontSize = 7.5.sp,
+                            letterSpacing = 1.1.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        Text("${files.size} file(s)", color = Pal.faint, fontSize = 8.5.sp)
+                        Spacer(Modifier.width(7.dp))
+                        Box(
+                            Modifier.size(22.dp).clip(RoundedCornerShape(7.dp))
+                                .background(Pal.violetSoft).clickable { showNew = true },
+                            contentAlignment = Alignment.Center
+                        ) { Text("＋", color = Pal.violet, fontSize = 11.sp) }
+                    }
+                    BasicTextField(
+                        value = search, onValueChange = { search = it }, singleLine = true,
+                        textStyle = TextStyle(fontSize = 11.sp, color = Pal.text,
+                            fontFamily = FontFamily.Monospace),
+                        decorationBox = { inner ->
+                            Box(
+                                Modifier.fillMaxWidth().padding(8.dp)
+                                    .clip(RoundedCornerShape(Tok.rS)).background(Pal.ink)
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                            ) {
+                                if (search.isEmpty()) Text("find a file…", color = Pal.faint,
+                                    fontSize = 10.5.sp, fontFamily = FontFamily.Monospace)
+                                inner()
+                            }
+                        }
+                    )
+                    LazyColumn(Modifier.heightIn(max = 250.dp).padding(bottom = 6.dp)) {
                         val shown = files.filter { search.isBlank() || it.contains(search, true) }
                         if (shown.isEmpty()) item {
-                            Text("no files — build a project or create one",
-                                color = Dim, fontSize = 11.sp, modifier = Modifier.padding(12.dp))
+                            Text(
+                                if (files.isEmpty()) "no files yet — ＋ creates one, or build a project"
+                                else "nothing matches \"$search\"",
+                                color = Pal.faint, fontSize = 10.sp,
+                                lineHeight = 14.sp,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                            )
                         }
                         items(shown) { f ->
-                            Row(Modifier.fillMaxWidth().clickable { open(f); showFiles = false }
-                                .padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                Text(Highlighter.titleOf(f), color = Txt, fontSize = 11.5.sp,
-                                    fontFamily = FontFamily.Monospace, maxLines = 1)
-                                Spacer(Modifier.weight(1f))
-                                Text(f.substringBeforeLast('/'), color = Dim, fontSize = 8.5.sp, maxLines = 1)
+                            val depth = (f.count { it == '/' } - 1).coerceIn(0, 4)
+                            val on = f == active
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .background(if (on) Pal.violetSoft else Color.Transparent)
+                                    .clickable { open(f); showFiles = false }
+                                    .padding(start = (12 + depth * 9).dp, end = 10.dp,
+                                        top = 7.dp, bottom = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(if (on) "●" else "·",
+                                    color = if (on) Pal.violet else Pal.faint, fontSize = 8.sp)
+                                Spacer(Modifier.width(6.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(Highlighter.titleOf(f), color = if (on) Pal.text else Pal.text,
+                                        fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1)
+                                    Text(f.substringBeforeLast('/', ""), color = Pal.faint,
+                                        fontSize = 8.sp, maxLines = 1,
+                                        fontFamily = FontFamily.Monospace)
+                                }
                             }
                         }
                     }
@@ -365,16 +468,35 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
         }
 
         // ------------------------------------------------------------- editor
-        Box(Modifier.weight(1f).fillMaxWidth().background(Color(0xFF0D0F14))) {
+        Box(Modifier.weight(1f).fillMaxWidth().background(EditorSurface)) {
             if (active == null) {
-                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("No file open", color = Txt, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                    Text("Files to open one · ＋ to create one", color = Dim, fontSize = 11.5.sp)
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = { showNew = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = Violet)) {
-                        Text("New file from template", fontSize = 12.sp)
+                Column(
+                    Modifier.fillMaxSize().padding(22.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        Modifier.size(54.dp).clip(RoundedCornerShape(18.dp))
+                            .background(Brush.linearGradient(listOf(Pal.violet, Pal.cyan))),
+                        contentAlignment = Alignment.Center
+                    ) { Text("⌘", color = Pal.ink, fontSize = 22.sp, fontWeight = FontWeight.Black) }
+                    Spacer(Modifier.height(14.dp))
+                    Text("Nothing open", color = Pal.text, fontSize = 16.sp,
+                        fontWeight = FontWeight.Black)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Open a file from the guest, or start a new one from a template.",
+                        color = Pal.faint, fontSize = 10.5.sp, textAlign = TextAlign.Center,
+                        lineHeight = 15.sp)
+                    Spacer(Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(Modifier.weight(1f)) {
+                            ActionTile("▤", "Open a file", "${files.size} in the guest", Pal.cyan) {
+                                showFiles = true; refresh()
+                            }
+                        }
+                        Box(Modifier.weight(1f)) {
+                            ActionTile("＋", "New file", "from a template", Pal.violet) { showNew = true }
+                        }
                     }
                 }
             } else {
@@ -394,9 +516,9 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
                                 for (i in firstVis until lastVis) {
                                     val here = i == caretLine
                                     Text("${i + 1}",
-                                        color = if (here) Cyan else Gutter,
+                                        color = if (here) Pal.violet else GutterText,
                                         fontSize = fontSp,
-                                        fontWeight = if (here) FontWeight.Bold else FontWeight.Normal,
+                                        fontWeight = if (here) FontWeight.Black else FontWeight.Normal,
                                         fontFamily = FontFamily.Monospace,
                                         lineHeight = lineHeight.sp,
                                         textAlign = TextAlign.End,
@@ -405,7 +527,7 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
                                 Spacer(Modifier.height(((lines.size - lastVis) * lineHeight).dp))
                             }
                             Box(Modifier.width(1.dp).height((lines.size * lineHeight + 8).dp)
-                                .background(LineC))
+                                .background(Pal.lineSoft))
                         }
                         val lang = if (bigFile) "" else Highlighter.langOf(active!!)
                         if (wrap) {
@@ -422,51 +544,150 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             }
         }
 
-        // diagnostics strip (from the same review used by Build Studio)
-        if (diagnostics.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().background(Color(0xFF2A1A14)).padding(horizontal = 10.dp, vertical = 4.dp)) {
-                Text("⚠ ${diagnostics.first()}", color = Amber, fontSize = 10.sp, maxLines = 1)
-                if (diagnostics.size > 1) {
+        // --------------------------------------------------------- bottom panel
+        //
+        // Problems and output used to be an inline strip plus a drawer that shoved
+        // the editor around. One panel, two tabs, closed by default — the code keeps
+        // the space until you ask for the detail.
+        if (panelTab >= 0) {
+            Column(Modifier.fillMaxWidth().background(Pal.surface)) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    PanelTab("Problems", diagnostics.size, 0, panelTab) { panelTab = 0 }
+                    Spacer(Modifier.width(5.dp))
+                    PanelTab("Output", null, 1, panelTab) { panelTab = 1 }
                     Spacer(Modifier.weight(1f))
-                    Text("+${diagnostics.size - 1} more", color = Dim, fontSize = 10.sp)
+                    Box(
+                        Modifier.size(22.dp).clip(RoundedCornerShape(7.dp))
+                            .background(Pal.surface2).clickable { panelTab = -1 },
+                        contentAlignment = Alignment.Center
+                    ) { Text("×", color = Pal.dim, fontSize = 11.sp) }
+                }
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 140.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    if (panelTab == 0) {
+                        if (diagnostics.isEmpty()) {
+                            Text("no problems found", color = Pal.mint, fontSize = 10.sp)
+                        } else {
+                            diagnostics.forEach { d ->
+                                Text("⚠  $d", color = Pal.amber, fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace, lineHeight = 15.sp)
+                            }
+                        }
+                    } else {
+                        Text(
+                            output.ifBlank { "nothing has run yet — Save & run puts the output here" },
+                            color = if (output.startsWith("saved")) Pal.mint else Pal.dim,
+                            fontSize = 10.sp, fontFamily = FontFamily.Monospace, lineHeight = 15.sp
+                        )
+                    }
                 }
             }
         }
 
-        // --------------------------------------------------- quick action bar
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Surf2)
-            .padding(horizontal = 6.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            QAction("⤺", accent = if (undoStack.isEmpty()) Dim else Txt) { undo() }
-            QAction("⤼", accent = if (redoStack.isEmpty()) Dim else Txt) { redo() }
-            QAction("Ln") { showGoto = true }
-            QAction("Find") { showSearch = true }
-            QAction("Dup") { withLines { l, n -> l.add(n + 1, l[n]); n + 1 to 0 } }
-            QAction("↑") { withLines { l, n -> if (n > 0) { swap(l, n, n - 1); n - 1 to 0 } else n to 0 } }
-            QAction("↓") { withLines { l, n -> if (n < l.size - 1) { swap(l, n, n + 1); n + 1 to 0 } else n to 0 } }
-            QAction("#") { withLines { l, n ->
-                val t = l[n].trimStart()
-                l[n] = if (t.startsWith("#") || t.startsWith("//"))
-                    l[n].replaceFirst(Regex("^(\\s*)(#|//)\\s?"), "$1") else {
-                    val pre = if (Highlighter.langOf(active ?: "") in listOf("py", "sh", "rb", "yaml")) "# " else "// "
-                    l[n].replaceFirst(Regex("^(\\s*)"), "$1$pre")
+        // ------------------------------------------------------------- rails
+        Column(Modifier.fillMaxWidth().background(Pal.surface).padding(vertical = 5.dp)) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                EditorPill("⤺", if (undoStack.isEmpty()) Pal.faint else Pal.text) { undo() }
+                EditorPill("⤼", if (redoStack.isEmpty()) Pal.faint else Pal.text) { redo() }
+                RailDivider()
+                EditorPill("Ln", Pal.dim) { showGoto = true }
+                EditorPill("⌕", Pal.dim) { showSearch = true }
+                EditorPill("Dup", Pal.dim) { withLines { l, n -> l.add(n + 1, l[n]); n + 1 to 0 } }
+                EditorPill("↑", Pal.dim) {
+                    withLines { l, n -> if (n > 0) { swap(l, n, n - 1); n - 1 to 0 } else n to 0 }
                 }
-                n to 0
-            } }
-            QAction(if (wrap) "Wrap on" else "Wrap off",
-                accent = if (wrap) Cyan else Dim) { wrap = !wrap; store.setWordWrap(wrap) }
-            QAction("A-") { fontSp = (fontSp.value - 1f).coerceAtLeast(9f).sp; store.setEditorFont(fontSp.value.toInt()) }
-            QAction("A+") { fontSp = (fontSp.value + 1f).coerceAtMost(22f).sp; store.setEditorFont(fontSp.value.toInt()) }
-            Spacer(Modifier.width(4.dp))
-            QAction("Save", accent = Green) { save() }
-            QAction(if (running) "…" else "Run", accent = Violet) { save(andRun = true) }
-            if ((active ?: "").endsWith(".html")) QAction("Preview", accent = Cyan) {
-                onPreview("file://" + (active ?: "").replace("~", "/root"))
+                EditorPill("↓", Pal.dim) {
+                    withLines { l, n -> if (n < l.size - 1) { swap(l, n, n + 1); n + 1 to 0 } else n to 0 }
+                }
+                EditorPill("#", Pal.dim) {
+                    withLines { l, n ->
+                        val t = l[n].trimStart()
+                        l[n] = if (t.startsWith("#") || t.startsWith("//"))
+                            l[n].replaceFirst(Regex("^(\\s*)(#|//)\\s?"), "$1")
+                        else {
+                            val pre = if (Highlighter.langOf(active ?: "") in
+                                listOf("py", "sh", "rb", "yaml")) "# " else "// "
+                            l[n].replaceFirst(Regex("^(\\s*)"), "$1$pre")
+                        }
+                        n to 0
+                    }
+                }
+                RailDivider()
+                EditorPill(if (wrap) "wrap" else "nowrap", if (wrap) Pal.cyan else Pal.faint) {
+                    wrap = !wrap; store.setWordWrap(wrap)
+                }
+                EditorPill("A-", Pal.dim) {
+                    fontSp = (fontSp.value - 1f).coerceAtLeast(9f).sp
+                    store.setEditorFont(fontSp.value.toInt())
+                }
+                EditorPill("A+", Pal.dim) {
+                    fontSp = (fontSp.value + 1f).coerceAtMost(22f).sp
+                    store.setEditorFont(fontSp.value.toInt())
+                }
+                if ((active ?: "").endsWith(".html"))
+                    EditorPill("◎", Pal.cyan) {
+                        onPreview("file://" + (active ?: "").replace("~", "/root"))
+                    }
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                Pressable(
+                    onClick = { save() }, enabled = active != null && dirty,
+                    modifier = Modifier.weight(1f), scaleDown = 0.97f
+                ) {
+                    Box(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(50))
+                            .background(
+                                if (active != null && dirty)
+                                    Brush.horizontalGradient(listOf(Pal.mint, Pal.cyan))
+                                else Brush.horizontalGradient(listOf(Pal.surface2, Pal.surface2))
+                            )
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            if (active == null) "Save" else if (dirty) "Save changes" else "Saved",
+                            color = if (active != null && dirty) Pal.ink else Pal.faint,
+                            fontSize = 11.5.sp, fontWeight = FontWeight.Black
+                        )
+                    }
+                }
+                Pressable(
+                    onClick = { save(andRun = true) }, enabled = active != null && !running,
+                    modifier = Modifier.weight(1f), scaleDown = 0.97f
+                ) {
+                    Box(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(50))
+                            .background(
+                                if (active != null && !running)
+                                    Brush.horizontalGradient(listOf(Pal.violet, Pal.cyan))
+                                else Brush.horizontalGradient(listOf(Pal.surface2, Pal.surface2))
+                            )
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(if (running) "running…" else "Save & run",
+                            color = if (active != null && !running) Pal.ink else Pal.faint,
+                            fontSize = 11.5.sp, fontWeight = FontWeight.Black)
+                    }
+                }
             }
         }
 
-        // ------------------------------------------------------ symbol row(s)
-        Column(Modifier.fillMaxWidth().background(Surf2)) {
+        // --------------------------------------------------------- symbol keys
+        Column(Modifier.fillMaxWidth().background(Pal.surface)) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Pal.lineSoft))
             SymbolsRow(listOf("\t", "{", "}", "(", ")", "[", "]", "<", ">", "=", "+", "-", "*", "/",
                 "\"", "'", ":", ";", ",", ".", "_", "#", "$", "&", "|", "!")) { insertAtCursor(it) }
             SymbolsRow(listOf("->", "=>", "==", "!=", "::", "&&", "||", "  ", "\n")) {
@@ -474,32 +695,38 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             }
         }
 
-        // --------------------------------------------------------- status bar
-        Row(Modifier.fillMaxWidth().background(Color(0xFF080A0E)).padding(horizontal = 10.dp, vertical = 3.dp)) {
+        // ----------------------------------------------------------- status bar
+        Row(
+            Modifier.fillMaxWidth().background(Pal.ink).padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             val caret = doc.selection.end
             val line = doc.text.take(caret).count { it == '\n' } + 1
             val col = caret - doc.text.take(caret).lastIndexOf('\n')
-            Text(Highlighter.langOf(active ?: "").ifBlank { "text" }.uppercase(), color = Dim, fontSize = 8.5.sp)
+            StatusPill(Highlighter.langOf(active ?: "").ifBlank { "text" }.uppercase(), Pal.violet)
+            Spacer(Modifier.width(6.dp))
+            Text("Ln $line:$col", color = Pal.dim, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
             Spacer(Modifier.weight(1f))
-            Text("Ln $line, Col $col", color = Dim, fontSize = 8.5.sp)
-            Spacer(Modifier.width(10.dp))
-            Text("${lines.size} lines", color = Dim, fontSize = 8.5.sp)
-            Spacer(Modifier.width(10.dp))
-            Text(if (bigFile) "large · highlight off" else "${doc.text.length} chars",
-                color = if (bigFile) Amber else Dim, fontSize = 8.5.sp)
-            Spacer(Modifier.width(10.dp))
-            Text(if (dirty) "● modified" else "saved", color = if (dirty) Amber else Green, fontSize = 8.5.sp)
+            if (bigFile) {
+                StatusPill("large · highlight off", Pal.amber)
+                Spacer(Modifier.width(6.dp))
+            }
+            Text("${lines.size} lines", color = Pal.faint, fontSize = 9.sp)
+            Spacer(Modifier.width(8.dp))
+            Text("${doc.text.length} chars", color = Pal.faint, fontSize = 9.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(if (panelTab >= 0) "panel" else "output",
+                color = if (panelTab >= 0) Pal.cyan else Pal.faint,
+                fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable { panelTab = if (panelTab >= 0) -1 else 1 })
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.size(6.dp).clip(RoundedCornerShape(50))
+                .background(if (dirty) Pal.amber else Pal.mint))
+            Spacer(Modifier.width(4.dp))
+            Text(if (dirty) "modified" else "saved",
+                color = if (dirty) Pal.amber else Pal.mint, fontSize = 9.sp)
         }
 
-        // output drawer
-        if (output.isNotBlank()) {
-            Surface(color = Color(0xFF080A0E), modifier = Modifier.fillMaxWidth().heightIn(max = 170.dp)) {
-                Column(Modifier.padding(10.dp).verticalScroll(rememberScrollState())) {
-                    Text(output, color = Color(0xFF9FB2C9), fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace, lineHeight = 15.sp)
-                }
-            }
-        }
     }
 
     // ------------------------------------------------------------- dialogs
@@ -524,55 +751,42 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
         GitSheet(run, active ?: "", onClose = { showGit = false })
     }
     confirmClose?.let { p ->
-        AlertDialog(
-            onDismissRequest = { confirmClose = null },
-            containerColor = Surf,
-            title = { Text("Unsaved changes", color = Txt, fontSize = 15.sp) },
-            text = { Text("${Highlighter.titleOf(p)} has edits that are not saved yet.",
-                color = Dim, fontSize = 12.sp) },
-            confirmButton = {
-                TextButton(onClick = { closeTab(p); confirmClose = null }) {
-                    Text("Discard", color = Red, fontSize = 12.sp)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmClose = null }) {
-                    Text("Keep editing", color = Cyan, fontSize = 12.sp)
-                }
-            }
-        )
+        HkDialog(
+            title = "Unsaved changes",
+            sub = Highlighter.titleOf(p),
+            onDismiss = { confirmClose = null },
+            accent = Pal.amber,
+            confirmLabel = "Discard",
+            dismissLabel = "Keep editing",
+            confirmTone = Pal.rose,
+            onConfirm = { closeTab(p); confirmClose = null }
+        ) {
+            Text("${Highlighter.titleOf(p)} has edits that are not saved yet.",
+                color = Pal.dim, fontSize = 11.sp, lineHeight = 16.sp)
+        }
     }
     if (showGoto) {
         var target by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showGoto = false },
-            containerColor = Surf,
-            title = { Text("Go to line", color = Txt, fontSize = 15.sp) },
-            text = {
-                Column {
-                    OutlinedTextField(target, { target = it }, singleLine = true,
-                        label = { Text("line number (1-${lines.size})", fontSize = 11.sp) },
-                        textStyle = TextStyle(fontSize = 13.sp, color = Txt,
-                            fontFamily = FontFamily.Monospace),
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Violet,
-                            unfocusedBorderColor = LineC))
-                    Text("jump inside the open file", color = Dim, fontSize = 10.sp,
-                        modifier = Modifier.padding(top = 6.dp))
+        HkDialog(
+            title = "Go to line",
+            sub = "this file has ${lines.size} lines",
+            onDismiss = { showGoto = false },
+            accent = Pal.cyan,
+            confirmLabel = "Go",
+            confirmTone = Pal.cyan,
+            onConfirm = {
+                val n = target.trim().toIntOrNull()
+                if (n != null && n >= 1) {
+                    val at = offsetOfLine(doc.text, n)
+                    doc = TextFieldValue(doc.text,
+                        androidx.compose.ui.text.TextRange(at.coerceIn(0, doc.text.length)))
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val n = target.trim().toIntOrNull()
-                    if (n != null && n >= 1) {
-                        val at = offsetOfLine(doc.text, n)
-                        doc = TextFieldValue(doc.text,
-                            androidx.compose.ui.text.TextRange(at.coerceIn(0, doc.text.length)))
-                    }
-                    showGoto = false
-                }) { Text("Go", color = Cyan, fontSize = 12.sp) }
-            },
-            dismissButton = { TextButton(onClick = { showGoto = false }) { Text("Cancel", color = Dim) } }
-        )
+                showGoto = false
+            }
+        ) {
+            HkField(target, { target = it }, hint = "line number (1-${lines.size})")
+            Text("jump inside the open file", color = Pal.faint, fontSize = 9.5.sp)
+        }
     }
     if (showSearch) {
         ProjectSearchDialog(run, onOpen = { path, line ->
@@ -635,6 +849,46 @@ private fun smartType(prev: TextFieldValue, next: TextFieldValue): TextFieldValu
 
 private fun swap(l: MutableList<String>, a: Int, b: Int) {
     val t = l[a]; l[a] = l[b]; l[b] = t
+}
+
+/** One square action on the editor header. */
+@Composable
+private fun EditorPill(label: String, tone: Color, onClick: () -> Unit) {
+    Pressable(onClick = onClick, scaleDown = 0.9f) {
+        Box(
+            Modifier.size(32.dp).clip(RoundedCornerShape(10.dp))
+                .background(tone.copy(alpha = 0.13f)),
+            contentAlignment = Alignment.Center
+        ) { Text(label, color = tone, fontSize = 12.sp, fontWeight = FontWeight.Black, maxLines = 1) }
+    }
+}
+
+/** Hairline between groups inside the action rail. */
+@Composable
+private fun RailDivider() {
+    Box(Modifier.padding(horizontal = 2.dp).width(1.dp).height(20.dp).background(Pal.line))
+}
+
+/** One tab of the bottom panel. */
+@Composable
+private fun PanelTab(label: String, count: Int?, index: Int, current: Int, onPick: () -> Unit) {
+    val on = current == index
+    Pressable(onClick = onPick, scaleDown = 0.95f) {
+        Row(
+            Modifier.clip(RoundedCornerShape(50))
+                .background(if (on) Pal.cyanSoft else Pal.surface2)
+                .padding(horizontal = 11.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, color = if (on) Pal.cyan else Pal.dim, fontSize = 9.5.sp,
+                fontWeight = FontWeight.Bold)
+            if (count != null) {
+                Spacer(Modifier.width(5.dp))
+                Text("$count", color = if (count > 0) Pal.amber else Pal.mint, fontSize = 9.sp,
+                    fontWeight = FontWeight.Black)
+            }
+        }
+    }
 }
 
 @Composable
@@ -702,44 +956,41 @@ private fun FindReplaceDialog(doc: TextFieldValue, onApply: (TextFieldValue) -> 
     var find by remember { mutableStateOf("") }
     var repl by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onClose,
-        containerColor = Surf,
-        title = { Text("Find & replace", color = Txt, fontSize = 15.sp) },
-        text = {
-            Column {
-                OutlinedTextField(find, { find = it }, label = { Text("find", fontSize = 11.sp) },
-                    singleLine = true, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Violet))
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(repl, { repl = it }, label = { Text("replace with", fontSize = 11.sp) },
-                    singleLine = true, colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Violet))
-                if (note.isNotBlank()) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(note, color = Cyan, fontSize = 10.5.sp)
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(onClick = {
-                        val idx = doc.text.indexOf(find, doc.selection.end)
-                        if (find.isBlank()) { note = "type something to find"; return@TextButton }
-                        if (idx < 0) note = "not found"
-                        else {
-                            onApply(TextFieldValue(doc.text,
-                                androidx.compose.ui.text.TextRange(idx, idx + find.length)))
-                            note = "found at $idx"
-                        }
-                    }) { Text("Find next", color = Cyan, fontSize = 12.sp) }
-                    TextButton(onClick = {
-                        if (find.isBlank()) { note = "type something to find"; return@TextButton }
-                        val n = doc.text.windowed(find.length, 1, true).count { it == find }
-                        onApply(TextFieldValue(doc.text.replace(find, repl)))
-                        note = "replaced $n occurrence(s)"
-                    }) { Text("Replace all", color = Green, fontSize = 12.sp) }
+    val count = remember(find, doc.text) {
+        if (find.isBlank()) 0 else doc.text.windowed(find.length, 1, true).count { it == find }
+    }
+    HkDialog(
+        title = "Find & replace",
+        sub = if (find.isBlank()) "type something to search for" else "$count match(es) in this file",
+        onDismiss = onClose,
+        accent = Pal.cyan,
+        confirmLabel = "Replace all",
+        dismissLabel = "Close",
+        confirmTone = Pal.mint,
+        onConfirm = {
+            if (find.isBlank()) note = "type something to find"
+            else {
+                onApply(TextFieldValue(doc.text.replace(find, repl)))
+                note = "replaced $count occurrence(s)"
+            }
+        }
+    ) {
+        HkField(find, { find = it }, hint = "find")
+        HkField(repl, { repl = it }, hint = "replace with")
+        if (note.isNotBlank()) Text(note, color = Pal.mint, fontSize = 10.sp)
+        GhostButton("Find next") {
+            if (find.isBlank()) note = "type something to find"
+            else {
+                val idx = doc.text.indexOf(find, doc.selection.end)
+                if (idx < 0) note = "not found after the caret"
+                else {
+                    onApply(TextFieldValue(doc.text,
+                        androidx.compose.ui.text.TextRange(idx, idx + find.length)))
+                    note = "found at character $idx"
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = onClose) { Text("Close", color = Dim) } }
-    )
+        }
+    }
 }
 
 @Composable
@@ -761,26 +1012,44 @@ private fun NewFileDialog(onClose: () -> Unit, onCreate: (String, String) -> Uni
             "        System.out.println(\"hello from the JVM\");\n    }\n}\n"),
         Tpl("Rust main", "main.rs", "fn main() {\n    println!(\"hello from cargo\");\n}\n")
     )
-    AlertDialog(
-        onDismissRequest = onClose, containerColor = Surf,
-        title = { Text("New file", color = Txt, fontSize = 15.sp) },
-        text = {
-            Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
-                Text("Created in ~/projects/scratch", color = Dim, fontSize = 10.5.sp)
-                Spacer(Modifier.height(8.dp))
-                templates.forEach { t ->
-                    Row(Modifier.fillMaxWidth().clickable {
-                        onCreate("~/projects/scratch/${t.path}", t.body)
-                    }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(t.name, color = Txt, fontSize = 12.5.sp)
-                        Spacer(Modifier.weight(1f))
-                        Text(t.path, color = Dim, fontSize = 9.5.sp, fontFamily = FontFamily.Monospace)
+    HkDialog(
+        title = "New file",
+        sub = "created in ~/projects/scratch",
+        onDismiss = onClose,
+        accent = Pal.violet,
+        confirmLabel = "Cancel",
+        dismissLabel = null,
+        onConfirm = onClose
+    ) {
+        Column(
+            Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            templates.forEach { t ->
+                Pressable(onClick = { onCreate("~/projects/scratch/${t.path}", t.body) }) {
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(Tok.rS))
+                            .background(Pal.surface2)
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            Modifier.size(26.dp).clip(RoundedCornerShape(8.dp))
+                                .background(Pal.violetSoft),
+                            contentAlignment = Alignment.Center
+                        ) { Text("＋", color = Pal.violet, fontSize = 12.sp, fontWeight = FontWeight.Black) }
+                        Spacer(Modifier.width(9.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(t.name, color = Pal.text, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                            Text(t.path, color = Pal.faint, fontSize = 8.5.sp,
+                                fontFamily = FontFamily.Monospace)
+                        }
+                        Text("›", color = Pal.faint, fontSize = 13.sp)
                     }
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = onClose) { Text("Cancel", color = Dim) } }
-    )
+        }
+    }
 }
 
 @Composable
@@ -798,45 +1067,55 @@ private fun GitSheet(run: (String) -> String, activeFile: String, onClose: () ->
         }
     }
 
-    AlertDialog(
-        onDismissRequest = onClose, containerColor = Surf,
-        title = { Text("Git · $dir", color = Txt, fontSize = 13.sp, maxLines = 1) },
-        text = {
-            Column {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(onClick = { go("git init") }) { Text("init", color = Cyan, fontSize = 12.sp) }
-                    TextButton(onClick = { go("git status --short") }) { Text("status", color = Cyan, fontSize = 12.sp) }
-                    TextButton(onClick = {
-                        go("git add -A && git -c user.email=dev@devstudio -c user.name=DevStudio " +
-                            "commit -m 'DevStudio commit' && git log --oneline -3")
-                    }) { Text("commit", color = Green, fontSize = 12.sp) }
-                }
-                Spacer(Modifier.height(8.dp))
-                Surface(color = Color(0xFF080A0E), shape = RoundedCornerShape(10.dp)) {
-                    Column(Modifier.padding(10.dp).heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
-                        Text(if (busy) "working…" else log, color = Color(0xFF9FB2C9), fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace, lineHeight = 15.sp)
+    HkDialog(
+        title = "Git", sub = dir, onDismiss = onClose, accent = Pal.mint,
+        confirmLabel = "Close", dismissLabel = null, onConfirm = onClose
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("init" to Pal.cyan, "status" to Pal.cyan, "commit" to Pal.mint).forEach { (label, tone) ->
+                Pressable(onClick = {
+                    when (label) {
+                        "init" -> go("git init")
+                        "status" -> go("git status --short")
+                        else -> go("git add -A && git -c user.email=dev@hakatron " +
+                            "-c user.name=Hakatron commit -m 'Hakatron commit' && git log --oneline -3")
                     }
+                }, scaleDown = 0.94f) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(50)).background(tone.copy(alpha = 0.16f))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) { Text(label, color = tone, fontSize = 10.5.sp, fontWeight = FontWeight.Bold) }
                 }
-                Text("git installs itself on first use if missing.", color = Dim, fontSize = 9.5.sp)
             }
-        },
-        confirmButton = { TextButton(onClick = onClose) { Text("Close", color = Dim) } }
-    )
+        }
+        MonoBlock(if (busy) "working…" else log, maxLines = 12)
+        Text("git installs itself on first use if it is missing.", color = Pal.faint, fontSize = 9.sp)
+    }
 }
 
 /* ----------------------------------------------------------------- preview */
 
 @Composable
 fun PreviewScreen(url: String, onClose: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(url, color = Cyan, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace,
-                modifier = Modifier.weight(1f), maxLines = 1)
-            TextButton(onClick = onClose) { Text("Close", color = Dim, fontSize = 11.sp) }
+    var web by remember { mutableStateOf<android.webkit.WebView?>(null) }
+    Screen(
+        title = "Preview", subtitle = url, accent = Pal.cyan,
+        actions = {
+            Box(
+                Modifier.size(30.dp).clip(RoundedCornerShape(9.dp)).background(Pal.surface2)
+                    .clickable { web?.reload() },
+                contentAlignment = Alignment.Center
+            ) { Text("↻", color = Pal.dim, fontSize = 12.sp) }
+            Spacer(Modifier.width(6.dp))
+            Box(
+                Modifier.clip(RoundedCornerShape(50)).background(Pal.surface2)
+                    .clickable { onClose() }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) { Text("Close", color = Pal.dim, fontSize = 10.5.sp, fontWeight = FontWeight.Bold) }
         }
+    ) {
         androidx.compose.ui.viewinterop.AndroidView(
-            modifier = Modifier.weight(1f).fillMaxWidth(),
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(top = 4.dp),
             factory = { c ->
                 android.webkit.WebView(c).apply {
                     webViewClient = android.webkit.WebViewClient()
@@ -844,8 +1123,10 @@ fun PreviewScreen(url: String, onClose: () -> Unit) {
                     settings.domStorageEnabled = true
                     settings.allowFileAccess = true
                     loadUrl(url)
+                    web = this
                 }
-            })
+            },
+            update = { w -> web = w })
     }
 }
 
@@ -884,47 +1165,45 @@ private fun ProjectSearchDialog(run: (String) -> String,
         }
     }
 
-    AlertDialog(
-        onDismissRequest = onClose,
-        containerColor = Surf,
-        title = { Text("Search project", color = Txt, fontSize = 15.sp) },
-        text = {
-            Column {
-                OutlinedTextField(q, { q = it }, label = { Text("text to find", fontSize = 11.sp) },
-                    singleLine = true, textStyle = TextStyle(fontSize = 12.sp, color = Txt),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Violet,
-                        unfocusedBorderColor = LineC),
-                    modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(onClick = { go() }) {
-                        Text(if (busy) "searching…" else "Search", color = Cyan, fontSize = 12.sp)
-                    }
-                    if (scanned.isNotBlank()) Text(scanned, color = Dim, fontSize = 10.5.sp,
-                        modifier = Modifier.padding(top = 12.dp))
-                }
-                if (hits.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    LazyColumn(Modifier.heightIn(max = 260.dp)) {
-                        items(hits) { (path, line, body) ->
-                            Column(Modifier.fillMaxWidth().clickable { onOpen(path, line) }
-                                .padding(vertical = 6.dp)) {
-                                Row {
-                                    Text(Highlighter.titleOf(path), color = Txt, fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold, maxLines = 1)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(":$line", color = Cyan, fontSize = 10.sp)
-                                }
-                                Text(body, color = Dim, fontSize = 9.5.sp,
-                                    fontFamily = FontFamily.Monospace, maxLines = 2)
+    HkDialog(
+        title = "Search the project",
+        sub = if (scanned.isBlank()) "grep across ~/projects" else scanned,
+        onDismiss = onClose,
+        accent = Pal.violet,
+        confirmLabel = if (busy) "searching…" else "Search",
+        dismissLabel = "Close",
+        onConfirm = { if (!busy) go() }
+    ) {
+        HkField(q, { q = it }, hint = "text to find")
+        if (hits.isNotEmpty()) {
+            Column(
+                Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                hits.forEach { (path, line, body) ->
+                    Pressable(onClick = { onOpen(path, line) }) {
+                        Column(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(Tok.rS))
+                                .background(Pal.surface2)
+                                .padding(horizontal = 9.dp, vertical = 7.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(path, color = Pal.cyan, fontSize = 9.5.sp,
+                                    fontFamily = FontFamily.Monospace, maxLines = 1,
+                                    modifier = Modifier.weight(1f))
+                                Text(":$line", color = Pal.faint, fontSize = 9.sp,
+                                    fontFamily = FontFamily.Monospace)
                             }
+                            Text(body, color = Pal.dim, fontSize = 9.sp, maxLines = 1,
+                                fontFamily = FontFamily.Monospace)
                         }
                     }
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = onClose) { Text("Close", color = Dim) } }
-    )
+        } else if (!busy && scanned.isNotBlank()) {
+            Text("no matches", color = Pal.faint, fontSize = 10.sp)
+        }
+    }
 }
 
 /** single-quote a string for the guest shell. */
