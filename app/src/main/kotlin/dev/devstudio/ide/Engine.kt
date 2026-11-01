@@ -1,5 +1,6 @@
 package dev.devstudio.ide
 
+import dev.devstudio.ide.core.TermuxUserland
 import android.content.Context
 import android.system.Os
 import java.io.File
@@ -345,6 +346,43 @@ object Engine {
      * `vi`, `top` and `less` behave as they do in Termux — with nothing outside
      * the app. When that binary is missing we fall back to piped stdio and say so.
      */
+    /** "termux" when the shell is the real Termux userland, "alpine" for the bundled guest. */
+    @Volatile var lastSessionUserland: String = "alpine"; private set
+
+    /** "native" when binaries run directly, "proot" when the Alpine guest runs them. */
+    @Volatile var lastSessionRuntime: String = "proot"; private set
+
+    /**
+     * Starts a shell in the REAL Termux userland: Termux's own bootstrap, running
+     * as Bionic binaries inside this app. Nothing is handed to the Termux app.
+     *
+     * A real pseudo-terminal is used when the userland has `script(1)` (Termux's
+     * util-linux); otherwise stdio is piped and the terminal says so. Both are
+     * honest — the UI never claims a pty it does not have.
+     */
+    fun termuxSession(ctx: Context): Process? {
+        val bash = TermuxUserland.bash(ctx) ?: return null
+        TermuxUserland.missingDirs(ctx)
+        val script = TermuxUserland.script(ctx)
+        val argv = if (script != null)
+            listOf(script.absolutePath, "-q", "-e", "-f", "-c",
+                "\"${bash.absolutePath}\" -l -i", "/dev/null")
+        else listOf("sh", "-c", "exec \"${bash.absolutePath}\" -l -i")
+        return try {
+            val pb = ProcessBuilder(argv)
+            pb.directory(TermuxUserland.home(ctx))
+            pb.environment().putAll(TermuxUserland.env(ctx))
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            lastSessionUserland = "termux"
+            lastSessionRuntime = "native"
+            lastSessionMode = if (script != null) "pty" else "pipe"
+            p
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     fun sessionProcess(ctx: Context, cols: Int, rows: Int, preferPty: Boolean = true): Process? {
         if (!isReady(ctx)) return null
         val lib = ctx.applicationInfo.nativeLibraryDir
@@ -380,6 +418,8 @@ object Engine {
             pb.environment().putAll(env)
             val p = pb.start()
             lastSessionMode = if (pty) "pty" else "pipe"
+            lastSessionUserland = "alpine"
+            lastSessionRuntime = "proot"
             // first-run shell conveniences, sourced only if it exists
             runCatching {
                 val init = File(rootfs(ctx), "root/.hakatron_init")

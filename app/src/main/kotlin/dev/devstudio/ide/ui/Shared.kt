@@ -71,7 +71,20 @@ object SharedFiles {
         return write("$SHARED/$name", text)
     }
 
-    /** Output of the last build handed to Termux (Termux tees it here). */
+    fun mkdir(ctx: Context, name: String): Boolean = runCatching {
+        File(SHARED, name).mkdirs()
+    }.getOrDefault(false)
+
+    fun rename(ctx: Context, from: String, to: String): Boolean = runCatching {
+        val src = File(from); val dst = File(to)
+        src.renameTo(dst) || run { src.copyTo(dst, overwrite = true); src.delete() }
+    }.getOrDefault(false)
+
+    fun delete(ctx: Context, path: String): Boolean = runCatching {
+        File(path).delete()
+    }.getOrDefault(false)
+
+    /** Output of the last build run from the app. */
     fun buildLog(): String? =
         runCatching { File(LOG).takeIf { it.exists() }?.readText()?.takeLast(6000) }.getOrNull()
 

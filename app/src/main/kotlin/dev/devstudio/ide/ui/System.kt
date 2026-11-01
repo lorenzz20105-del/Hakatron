@@ -1,389 +1,244 @@
 package dev.devstudio.ide.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Surface
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.devstudio.ide.Engine
-import dev.devstudio.ide.termux.TermuxBridge
+import dev.devstudio.ide.core.TermuxUserland
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * System tab — the honest control room.
+ * System — engine, userland, storage, diagnostics.
  *
- * Everything here is measured, never faked: the toolchain matrix comes from
- * `command -v` inside the guest, sizes come from the filesystem, and the
- * self-test prints the guest's own answers. Nothing shows "ready" unless a
- * real binary answered.
+ * Rebuilt around one idea: every card answers "is this working, and if not, what
+ * exactly is wrong?" No switches that look on while something is off, and no
+ * "Termux needed" instructions that point at another app.
  */
 @Composable
-fun SystemScreen(ready: Boolean, busy: Boolean, log: String,
-                 onTermux: () -> Unit, onSetup: () -> Unit) {
-    val ctx = LocalContext.current
+fun SystemScreen(
+    ready: Boolean,
+    busy: Boolean,
+    log: String,
+    onSetup: () -> Unit,
+    onTermuxChanged: (Boolean) -> Unit = {},
+    onBack: () -> Unit = {}
+) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    val verdict = remember { TermuxBridge.verdict(ctx) }
 
+    var termux by remember { mutableStateOf(TermuxUserland.isInstalled(ctx)) }
+    var installing by remember { mutableStateOf(false) }
+    var progress by remember { mutableStateOf(0f) }
+    var phase by remember { mutableStateOf("") }
+    var tlog by remember { mutableStateOf<String?>(null) }
+    var diag by remember { mutableStateOf<String?>(null) }
     var access by remember { mutableStateOf(SharedFiles.hasAccess(ctx)) }
-    var files by remember { mutableStateOf(0) }
-    var distros by remember { mutableStateOf(SharedFiles.distros()) }
-    var tlog by remember { mutableStateOf<String?>(SharedFiles.buildLog()) }
+    var sizeMb by remember { mutableStateOf(0L) }
+    var freeMb by remember { mutableStateOf(0L) }
     var tools by remember { mutableStateOf<List<Pair<String, Boolean>>>(emptyList()) }
-    var probing by remember { mutableStateOf(false) }
-    var installing by remember { mutableStateOf<String?>(null) }
-    var selfTest by remember { mutableStateOf<String?>(null) }
-    var toast by remember { mutableStateOf<String?>(null) }
 
-    fun probe() {
-        if (!ready) return
-        probing = true
-        scope.launch {
-            tools = withContext(Dispatchers.IO) { runCatching { Engine.tools(ctx) }.getOrDefault(emptyList()) }
-            probing = false
-        }
-    }
-    LaunchedEffect(ready) { probe() }
-
-    fun install(label: String, pkg: String) {
-        if (installing != null) return
-        installing = label
-        scope.launch {
-            val out = withContext(Dispatchers.IO) { Engine.install(ctx, pkg) }
-            toast = out.lines().lastOrNull { it.isNotBlank() } ?: "$label done"
-            tools = withContext(Dispatchers.IO) { runCatching { Engine.tools(ctx) }.getOrDefault(emptyList()) }
-            installing = null
+    LaunchedEffect(ready, termux) {
+        withContext(Dispatchers.IO) {
+            freeMb = runCatching { Engine.freeSpaceMb(ctx) }.getOrDefault(0)
+            sizeMb = runCatching { Engine.guestSizeMb(ctx) }.getOrDefault(0)
+            if (ready) tools = runCatching { Engine.tools(ctx) }.getOrDefault(emptyList())
         }
     }
 
-    val freeMb = remember(ready) { runCatching { Engine.freeSpaceMb(ctx) }.getOrDefault(0L) }
-    val guestMb = remember(ready) { runCatching { Engine.guestSizeMb(ctx) }.getOrDefault(0L) }
+    Screen(title = "System", subtitle = "Engine · userland · storage", accent = Pal.amber) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp)) {
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("System", color = Txt, fontSize = 20.sp, fontWeight = FontWeight.Black)
-                Text("Engine, toolchain, storage, Termux", color = Dim, fontSize = 11.sp)
-            }
-            Text("Hakatron 0.15", color = Dim, fontSize = 10.sp)
-        }
-        Spacer(Modifier.height(12.dp))
-
-        /* ------------------------------------------------ engine hero */
-        Column(Modifier.fillMaxWidth()
-            .background(Brush.linearGradient(listOf(Color(0xFF1B1B3A), Color(0xFF2A1636))),
-                RoundedCornerShape(18.dp))
-            .padding(15.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Dot(if (ready) Green else Amber)
-                Spacer(Modifier.width(7.dp))
-                Text(if (ready) "Linux engine ready" else "Linux engine not installed",
-                    color = Txt, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.weight(1f))
-                Pill("Alpine 3.20", Color(0xFFC9C3E6))
-            }
-            Spacer(Modifier.height(6.dp))
-            Text("PRoot + Alpine ${if (guestMb > 0) "· $guestMb MB" else ""} · arm64 · runs fully " +
-                "inside Hakatron, no Termux and no root needed.", color = Color(0xFFC9C3E6),
-                fontSize = 10.5.sp, lineHeight = 15.sp)
-            if (!ready) {
-                Spacer(Modifier.height(10.dp))
-                if (busy) Text(log.ifBlank { "working…" }, color = Amber, fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace)
-                else AccentButton("Install engine (once, ~120 MB)", onClick = onSetup)
-            } else {
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AccentButton(if (selfTest == null) "Run self-test" else "Self-test again", onClick = {
-                        scope.launch {
-                            selfTest = "running…"
-                            selfTest = withContext(Dispatchers.IO) { Engine.selfTest(ctx) }
+            // ------------------------------------------------ engine
+            SectionRow("LINUX ENGINE")
+            TCard(Modifier.fillMaxWidth(), radius = Tok.rL,
+                glow = if (ready) Pal.mint else Pal.amber) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Ring(if (ready) 1f else 0.06f, if (ready) Pal.mint else Pal.amber, 44.dp)
+                            Text(if (ready) "✓" else "!", color = if (ready) Pal.mint else Pal.amber,
+                                fontSize = 13.sp, fontWeight = FontWeight.Black)
                         }
-                    })
-                    GhostButton("Storage") { toast = "Free ${freeMb} MB · guest ${guestMb} MB" }
-                }
-            }
-        }
-
-        selfTest?.let {
-            Spacer(Modifier.height(10.dp))
-            Box(Modifier.fillMaxWidth().background(Color(0xFF080A0E), RoundedCornerShape(12.dp))
-                .border(1.dp, LineC, RoundedCornerShape(12.dp)).padding(11.dp)) {
-                Text(it.takeLast(1600), color = Color(0xFF9FB2C9), fontSize = 9.5.sp,
-                    fontFamily = FontFamily.Monospace, lineHeight = 13.sp)
-            }
-        }
-
-        /* ------------------------------------------------ Devos engine */
-        Spacer(Modifier.height(14.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("DEVOS ENGINE", color = Dim, fontSize = 9.5.sp, letterSpacing = 1.1.sp)
-            Spacer(Modifier.weight(1f))
-            Pill("v10", Green)
-        }
-        Spacer(Modifier.height(6.dp))
-        Column(Modifier.fillMaxWidth().background(Color(0xFF0F1116), RoundedCornerShape(14.dp))
-            .border(1.dp, LineC, RoundedCornerShape(14.dp)).padding(13.dp)) {
-            Text("Plan → build → read the error → fix → retry, until the project is done.",
-                color = Txt, fontSize = 11.5.sp, lineHeight = 16.sp)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Pill("59 rules", Color(0xFF9FB2C9)); Pill("56 projects", Color(0xFF9FB2C9))
-                Pill("19 toolchains", Color(0xFF9FB2C9))
-            }
-            Spacer(Modifier.height(8.dp))
-            Text("Trained and checked against a real Alpine guest: 50/56 projects built " +
-                "with 6 honest refusals and 0 unexpected stops. Real apk, pip, npm, cargo, " +
-                "gem, composer and psql runs — 30/30 sandbox checks passed.",
-                color = Dim, fontSize = 10.sp, lineHeight = 14.sp)
-            Spacer(Modifier.height(6.dp))
-            Text("It never edits your source to make a build pass: config files " +
-                "(tsconfig.json, package.json) yes, your logic never.",
-                color = Color(0xFF7DE2A8), fontSize = 10.sp, lineHeight = 14.sp)
-        }
-
-        /* ------------------------------------------------ toolchain */
-        Spacer(Modifier.height(14.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("TOOLCHAIN", color = Dim, fontSize = 9.5.sp, letterSpacing = 1.1.sp)
-            Spacer(Modifier.weight(1f))
-            Text(if (probing) "checking…" else "re-check", color = Cyan, fontSize = 9.5.sp,
-                modifier = Modifier.clickable { probe() })
-        }
-        Spacer(Modifier.height(6.dp))
-        if (!ready) {
-            Text("Install the engine to see which compilers are available.",
-                color = Dim, fontSize = 11.sp, lineHeight = 16.sp)
-        } else {
-            val present = tools.count { it.second }
-            Text("$present of ${tools.size} found by `command -v` inside the guest. " +
-                "Missing ones install with apk in one tap.", color = Dim, fontSize = 10.5.sp,
-                lineHeight = 15.sp)
-            Spacer(Modifier.height(8.dp))
-            tools.chunked(2).forEach { row ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    row.forEach { (name, ok) ->
-                        val pkg = when (name) {
-                            "gcc", "make" -> "build-base"
-                            "javac" -> "openjdk17"
-                            "rustc" -> "rust"
-                            else -> name
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(if (ready) "Alpine guest ready" else "Not set up",
+                                color = Pal.text, fontSize = 13.5.sp, fontWeight = FontWeight.Black)
+                            Text(
+                                if (ready) "$sizeMb MB on disk · ${Engine.launchMode} launch · no root"
+                                else "Unpacks inside the app (~120 MB free needed)",
+                                color = Pal.dim, fontSize = 10.sp
+                            )
                         }
-                        Surface(shape = RoundedCornerShape(11.dp),
-                            color = if (ok) Color(0xFF10251D) else Surf,
-                            border = BorderStroke(1.dp, if (ok) Color(0xFF2E6B57) else LineC),
-                            modifier = Modifier.weight(1f).clickable {
-                                if (!ok) install(name, pkg)
-                                else toast = "$name is already installed"
-                            }) {
-                            Column(Modifier.padding(10.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(name, color = if (ok) Color(0xFF7BF3BE) else Txt,
-                                        fontSize = 11.5.sp, fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace)
-                                    Spacer(Modifier.weight(1f))
-                                    Text(if (installing == name) "…" else if (ok) "✓" else "+",
-                                        color = if (ok) Color(0xFF7BF3BE) else Cyan, fontSize = 11.sp)
-                                }
-                                Text(if (ok) "installed" else "apk add $pkg",
-                                    color = Dim, fontSize = 8.5.sp, fontFamily = FontFamily.Monospace,
-                                    maxLines = 1)
+                    }
+                    if (busy) {
+                        Spacer(Modifier.height(10.dp))
+                        LinearProgressIndicator(Modifier.fillMaxWidth(), color = Pal.amber,
+                            trackColor = Pal.surface3)
+                        Text(log.ifBlank { "working…" }, color = Pal.amber, fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 6.dp))
+                    } else {
+                        Spacer(Modifier.height(11.dp))
+                        GlowButton(
+                            if (ready) "Re-check the engine" else "Install the engine",
+                            from = Pal.amber, to = Pal.mint
+                        ) {
+                            if (ready) scope.launch {
+                                diag = withContext(Dispatchers.IO) { Engine.diagnose(ctx) }
+                            } else onSetup()
+                        }
+                    }
+                    diag?.let {
+                        Spacer(Modifier.height(9.dp))
+                        MonoBlock(it, maxLines = 10)
+                    }
+                    if (tools.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            tools.forEach { (name, on) ->
+                                StatusPill(name, if (on) Pal.mint else Pal.faint, filled = on)
                             }
                         }
                     }
-                    if (row.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
-            if (installing != null) {
-                Spacer(Modifier.height(6.dp))
-                Text("installing $installing — apk writes to the guest, first run needs network…",
-                    color = Amber, fontSize = 10.sp)
-            }
-        }
 
-        toast?.let {
-            Spacer(Modifier.height(8.dp))
-            Box(Modifier.fillMaxWidth().background(Color(0xFF14261F), RoundedCornerShape(11.dp))
-                .padding(10.dp)) {
-                Text(it, color = Color(0xFF9FE8C8), fontSize = 10.5.sp, lineHeight = 15.sp)
-            }
-        }
-
-        /* ------------------------------------------------ storage */
-        Spacer(Modifier.height(14.dp))
-        Text("STORAGE", color = Dim, fontSize = 9.5.sp, letterSpacing = 1.1.sp)
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Kpi(Modifier.weight(1f), "FREE", if (freeMb > 1024) "${freeMb / 1024}.${(freeMb % 1024) / 103} GB" else "$freeMb MB",
-                if (freeMb > 500) Green else Amber)
-            Kpi(Modifier.weight(1f), "GUEST", "$guestMb MB", Cyan)
-            Kpi(Modifier.weight(1f), "SHARED", "$files", Violet)
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            GhostButton("Recount files") {
-                files = runCatching { SharedFiles.list(ctx).size }.getOrDefault(0)
-            }
-            GhostButton("Trim logs") {
-                SharedFiles.clearLog()
-                toast = "Shared log cleared — the guest rootfs was left alone."
-            }
-        }
-
-        /* ------------------------------------------------ termux build log */
-        Spacer(Modifier.height(10.dp))
-        CardBox {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Last Termux build", color = Txt, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
-                    Text(SharedFiles.DIR + "/last-build.log", color = Dim, fontSize = 9.sp,
-                        fontFamily = FontFamily.Monospace, maxLines = 1)
+            // ------------------------------------------------ termux userland
+            SectionRow("TERMUX USERLAND", if (termux) "installed" else "optional")
+            TCard(Modifier.fillMaxWidth(), radius = Tok.rL,
+                glow = if (termux) Pal.mint else Pal.cyan) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Ring(if (termux) 1f else 0.04f, if (termux) Pal.mint else Pal.cyan, 44.dp)
+                            Text("❯", color = if (termux) Pal.mint else Pal.cyan, fontSize = 13.sp,
+                                fontWeight = FontWeight.Black)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(if (termux) "Termux installed" else "Add the real Termux userland",
+                                color = Pal.text, fontSize = 13.5.sp, fontWeight = FontWeight.Black)
+                            Text(
+                                if (termux) "${TermuxUserland.installedSizeMb(ctx)} MB · ${TermuxUserland.buildFor(ctx).arch} · runs natively"
+                                else "Termux's own bootstrap, inside Hakatron. bash, git, python, apt — no other app.",
+                                color = Pal.dim, fontSize = 10.sp, lineHeight = 14.sp
+                            )
+                        }
+                    }
+                    if (installing) {
+                        Spacer(Modifier.height(10.dp))
+                        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(),
+                            color = Pal.cyan, trackColor = Pal.surface3)
+                        Text(phase, color = Pal.cyan, fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 6.dp))
+                    } else {
+                        Spacer(Modifier.height(11.dp))
+                        GlowButton(
+                            if (termux) "Re-install / update" else "Install Termux userland (~${TermuxUserland.buildFor(ctx).approxMb} MB)",
+                            from = Pal.cyan, to = Pal.mint
+                        ) {
+                            if (!ready) { tlog = "Set the engine up first — the unpack runs inside it."; return@GlowButton }
+                            installing = true
+                            progress = 0f
+                            tlog = null
+                            scope.launch {
+                                val msg = withContext(Dispatchers.IO) {
+                                    TermuxUserland.install(
+                                        ctx,
+                                        run = { c -> Engine.exec(ctx, c, 1_800_000) },
+                                        onProgress = { p ->
+                                            phase = p.phase
+                                            progress = if (p.total > 0) (p.done.toFloat() / p.total) else 0f
+                                        }
+                                    )
+                                }
+                                tlog = msg
+                                installing = false
+                                termux = TermuxUserland.isInstalled(ctx)
+                                onTermuxChanged(termux)
+                            }
+                        }
+                    }
+                    tlog?.let {
+                        Spacer(Modifier.height(9.dp))
+                        MonoBlock(it, tone = if (it.startsWith("Termux userland installed")) Pal.mint else Pal.amber,
+                            maxLines = 12)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text("Expected ~${TermuxUserland.buildFor(ctx).approxMb} MB download, ~200 MB on disk, " +
+                        "fetched once from the Termux project's own release page. Hakatron never uploads anything.",
+                        color = Pal.faint, fontSize = 9.sp, lineHeight = 13.sp)
                 }
-                Pill(if (tlog == null) "empty" else "captured", if (tlog == null) Dim else Green)
             }
-            Spacer(Modifier.height(7.dp))
-            // Termux is a different app: a file is the only way its output can be shown here
-            val shown = tlog
-            if (shown != null) {
-                Box(Modifier.fillMaxWidth().background(Color(0xFF07090D), RoundedCornerShape(10.dp))
-                    .border(1.dp, LineC, RoundedCornerShape(10.dp)).padding(9.dp)) {
-                    Text(shown.lines().takeLast(18).joinToString("\n"),
-                        color = Color(0xFF9FB2C9), fontSize = 9.sp,
-                        fontFamily = FontFamily.Monospace, lineHeight = 13.sp)
-                }
-            } else {
-                Text("Send a build with the Termux engine — its full output is teed into this " +
-                    "file, so the IDE can show what happened without switching apps.",
-                    color = Dim, fontSize = 10.5.sp, lineHeight = 15.sp)
+
+            // ------------------------------------------------ storage
+            SectionRow("STORAGE")
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                StatTile("FREE", "$freeMb MB", if (freeMb > 800) Pal.mint else Pal.amber,
+                    Modifier.weight(1f))
+                StatTile("GUEST", "$sizeMb MB", Pal.cyan, Modifier.weight(1f))
+                StatTile("SHARED", if (access) "on" else "off",
+                    if (access) Pal.mint else Pal.amber, Modifier.weight(1f))
             }
             Spacer(Modifier.height(9.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                GhostButton("Reload") { tlog = SharedFiles.buildLog() }
-                GhostButton("Clear") { SharedFiles.clearLog(); tlog = null }
-            }
-        }
-
-        /* ------------------------------------------------ shared + termux */
-        Spacer(Modifier.height(14.dp))
-        CardBox {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Shared folder", color = Txt, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
-                    Text(SharedFiles.SHARED, color = Dim, fontSize = 9.5.sp,
+            TCard(Modifier.fillMaxWidth().clickable {
+                SharedFiles.requestAccess(ctx)
+                access = SharedFiles.hasAccess(ctx)
+            }) {
+                Column(Modifier.padding(13.dp)) {
+                    Text(if (access) "Shared folder is writable" else "Allow files access",
+                        color = Pal.text, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(SharedFiles.DIR, color = Pal.faint, fontSize = 9.5.sp,
                         fontFamily = FontFamily.Monospace, maxLines = 1)
-                }
-                Pill(if (access) "granted" else "blocked", if (access) Green else Amber)
-            }
-            Spacer(Modifier.height(7.dp))
-            Text("One folder both apps can read: Hakatron writes builds here, Termux reads them " +
-                "(and writes logs back). Termux side needs `termux-setup-storage` once.",
-                color = Dim, fontSize = 10.5.sp, lineHeight = 15.sp)
-            Spacer(Modifier.height(9.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!access) AccentButton("Allow files", onClick = { SharedFiles.requestAccess(ctx) })
-                GhostButton("Seed samples") {
-                    SharedFiles.seed(ctx); files = SharedFiles.list(ctx).size
-                    toast = "Wrote hello.py and build.sh into the shared folder."
+                    Spacer(Modifier.height(7.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        StatusPill(if (access) "granted" else "tap to grant",
+                            if (access) Pal.mint else Pal.amber, filled = true)
+                        Box(Modifier.clip(RoundedCornerShape(50)).background(Pal.surface2)
+                            .clickable { SharedFiles.seed(ctx) }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)) {
+                            Text("seed README", color = Pal.dim, fontSize = 9.5.sp,
+                                fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
+
+            // ------------------------------------------------ about
+            SectionRow("ABOUT")
+            TCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(13.dp)) {
+                    val v = remember {
+                        runCatching {
+                            ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+                        }.getOrDefault("")
+                    }
+                    Text("Hakatron $v", color = Pal.text, fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Black)
+                    Spacer(Modifier.height(3.dp))
+                    Text("Kotlin · Jetpack Compose · ML Kit (on-device) · PRoot + Alpine · " +
+                        "Termux bootstrap (optional). No source file of yours is ever edited by Devos.",
+                        color = Pal.dim, fontSize = 9.5.sp, lineHeight = 14.sp)
+                    Spacer(Modifier.height(8.dp))
+                    GhostButton("Back to dashboard") { onBack() }
+                }
+            }
+            Spacer(Modifier.height(96.dp))
         }
-
-        Spacer(Modifier.height(10.dp))
-        CardBox {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Termux", color = Txt, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        if (!verdict.installed) "not installed"
-                        else if (verdict.genuine) "genuine · ${verdict.version}"
-                        else "installed from Play Store — RUN_COMMAND disabled by its signature",
-                        color = if (verdict.genuine) Green else Amber, fontSize = 10.5.sp)
-                }
-                Pill(if (verdict.genuine) "linked" else "off", if (verdict.genuine) Green else Dim)
-            }
-            Spacer(Modifier.height(7.dp))
-            Text("Second engine: real `pkg install` and proot-distro distros. The built-in engine " +
-                "above never depends on it.", color = Dim, fontSize = 10.5.sp, lineHeight = 15.sp)
-            if (distros.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                distros.take(5).forEach {
-                    Text("· $it", color = Color(0xFF7BF3BE), fontSize = 9.5.sp,
-                        fontFamily = FontFamily.Monospace, maxLines = 1)
-                }
-            }
-            Spacer(Modifier.height(9.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AccentButton("Open Termux tools", onClick = onTermux)
-                GhostButton("Refresh") {
-                    distros = SharedFiles.distros()
-                    tlog = SharedFiles.buildLog()
-                }
-            }
-        }
-
-        /* ------------------------------------------------ about */
-        Spacer(Modifier.height(10.dp))
-        CardBox {
-            Text("About", color = Txt, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
-            listOf(
-                "App" to "Hakatron 0.5.0 (code 5)",
-                "Package" to "dev.devstudio.ide",
-                "Device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
-                "Android" to android.os.Build.VERSION.RELEASE,
-                "ABI" to (android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "?"),
-                "Engine" to "PRoot + Alpine 3.20 (musl, fake-root)"
-            ).forEach { (k, v) ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                    Text(k, color = Dim, fontSize = 10.5.sp, modifier = Modifier.width(64.dp))
-                    Text(v, color = Txt, fontSize = 10.5.sp, fontFamily = FontFamily.Monospace,
-                        maxLines = 1)
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            Text("PRoot is ptrace-based, so heavy compiles are slower than native. That is the " +
-                "price of running Linux without root — it is a real trade, not a bug.",
-                color = Dim, fontSize = 9.5.sp, lineHeight = 14.sp)
-        }
-        Spacer(Modifier.height(24.dp))
-    }
-}
-
-@Composable
-internal fun CardBox(content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Surf, RoundedCornerShape(16.dp))
-        .border(1.dp, LineC, RoundedCornerShape(16.dp)).padding(14.dp), content = content)
-}
-
-@Composable
-internal fun AccentButton(label: String, onClick: () -> Unit) {
-    Box(Modifier.background(Cyan, RoundedCornerShape(10.dp)).clickable { onClick() }
-        .padding(horizontal = 14.dp, vertical = 8.dp)) {
-        Text(label, color = Color(0xFF04121A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-internal fun GhostButton(label: String, onClick: () -> Unit) {
-    Box(Modifier.border(1.dp, LineC, RoundedCornerShape(10.dp)).clickable { onClick() }
-        .padding(horizontal = 14.dp, vertical = 8.dp)) {
-        Text(label, color = Txt, fontSize = 12.sp)
     }
 }

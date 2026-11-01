@@ -38,17 +38,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-internal val Bg = Color(0xFF0B0C10)
-internal val Surf = Color(0xFF15171E)
-internal val Surf2 = Color(0xFF1D2029)
-internal val LineC = Color(0xFF282C38)
-internal val Txt = Color(0xFFE9EBF2)
-internal val Dim = Color(0xFF9AA0B0)
-internal val Violet = Color(0xFF8B5CF6)
-internal val Cyan = Color(0xFF22D3EE)
-internal val Green = Color(0xFF34D399)
-internal val Amber = Color(0xFFFBBF24)
-internal val Red = Color(0xFFF87171)
+/*
+ * The legacy names below are kept as aliases, but they now point at the new
+ * design tokens in Kit.kt. That is deliberate: the editor and the terminal are
+ * large, working surfaces, and remapping their palette onto the rebuilt system
+ * updates every pixel of them at once instead of restyling them file by file and
+ * leaving half the app on the old greys.
+ */
+internal val Bg = Pal.ink
+internal val Surf = Pal.surface
+internal val Surf2 = Pal.surface2
+internal val LineC = Pal.line
+internal val Txt = Pal.text
+internal val Dim = Pal.dim
+internal val Violet = Pal.violet
+internal val Cyan = Pal.cyan
+internal val Green = Pal.mint
+internal val Amber = Pal.amber
+internal val Red = Pal.rose
 private val Gutter = Color(0xFF454B5C)
 
 /** Guest file helpers — base64 both ways so quotes, $ and newlines survive the shell. */

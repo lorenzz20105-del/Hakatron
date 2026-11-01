@@ -11,8 +11,8 @@ android {
         applicationId = "dev.devstudio.ide"
         minSdk = 24
         targetSdk = 34
-        versionCode = 16
-        versionName = "0.15.0"
+        versionCode = 17
+        versionName = "0.16.0"
         resourceConfigurations += listOf("en")
 
         // Universal APK on purpose: 0.12.0 shipped arm64-v8a only and was refused

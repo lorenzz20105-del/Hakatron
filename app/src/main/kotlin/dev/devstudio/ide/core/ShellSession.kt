@@ -33,6 +33,9 @@ class ShellSession(
     /** "pty" when a real pseudo-terminal was allocated, "pipe" otherwise. */
     @Volatile var mode: String = "starting"; private set
 
+    /** Which userland this session is in: "termux" (real bootstrap) or "alpine". */
+    @Volatile var userland: String = "alpine"; private set
+
     /** bumped on every chunk of output so the UI can recompose cheaply */
     val version = AtomicInteger(0)
 
@@ -49,8 +52,11 @@ class ShellSession(
         if (running) return
         if (!Engine.isReady(ctx)) { mode = "no-engine"; return }
 
-        val p = Engine.sessionProcess(ctx, cols, rows, preferPty = true)
+        // A real Termux userland wins when it is installed: native Bionic binaries,
+        // no ptrace overhead. Otherwise the bundled Alpine guest, which always works.
+        val p = Engine.termuxSession(ctx) ?: Engine.sessionProcess(ctx, cols, rows, preferPty = true)
         if (p == null) { mode = "failed"; return }
+        userland = Engine.lastSessionUserland
         proc = p
         stdin = p.outputStream
         running = true

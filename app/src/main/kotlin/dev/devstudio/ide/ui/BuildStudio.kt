@@ -30,7 +30,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import dev.devstudio.ide.core.Analyzer
 import dev.devstudio.ide.core.Planner
-import dev.devstudio.ide.termux.TermuxBridge
 import dev.devstudio.ide.core.Store
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -48,14 +47,11 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {},
     var running by remember { mutableStateOf(false) }
     var setupText by remember { mutableStateOf("") }
     var result by remember { mutableStateOf<Planner.Result?>(null) }
-    var useTermux by remember { mutableStateOf(false) }
-    var tlog by remember { mutableStateOf<String?>(null) }
     var ocrNote by remember { mutableStateOf<String?>(null) }
     var ocrBusy by remember { mutableStateOf(false) }
     var ocrProg by remember { mutableStateOf("") }
     // "this is source code, not a project tree" — detected, not guessed at run time
     val structureIsCode = remember(structure) { Analyzer.isSourceCode(structure) }
-    val verdict = remember { TermuxBridge.verdict(ctx) }
     val store = remember { Store(ctx) }
 
     val planner = remember {
@@ -97,7 +93,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {},
                 Column(Modifier.padding(12.dp)) {
                     Text("Engine not set up yet", color = Amber, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
                     Text("Build Studio runs real commands — set up the built-in Alpine Linux first " +
-                        "(System tab, ~1 minute, no Termux needed).", color = Color(0xFFE8D6C8), fontSize = 11.sp)
+                        "(System tab, ~1 minute).", color = Color(0xFFE8D6C8), fontSize = 11.sp)
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -199,45 +195,14 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {},
         PasteField(notes, { notes = it }, 6,
             "Tools needed first: gcc, make\nBefore building: mkdir -p build\nBuild: make\nRun: ./app")
 
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            listOf("Built-in Linux" to false, "Termux" to true).forEach { (label, isT) ->
-                val on = useTermux == isT
-                Surface(shape = RoundedCornerShape(10.dp),
-                    color = if (on) Color(0xFF221A3F) else Surf,
-                    border = BorderStroke(1.dp, if (on) Violet else LineC),
-                    modifier = Modifier.clickable { useTermux = isT }) {
-                    Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                        Text(label, color = if (on) Color(0xFFC4B5FD) else Dim, fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Bold)
-                        Text(if (isT) (if (verdict.genuine) "genuine ${verdict.version}" else "not ready")
-                             else "self-fixing builds",
-                            color = Dim, fontSize = 9.sp)
-                    }
-                }
-            }
+        // One engine, no picker: the build runs in the guest that owns this app.
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusPill(if (Engine.lastSessionUserland == "termux") "Termux userland" else "Alpine guest",
+                Pal.mint)
+            Spacer(Modifier.width(7.dp))
+            Text("self-fixing builds · nothing leaves the phone", color = Pal.faint, fontSize = 9.5.sp)
         }
-        if (useTermux) {
-            Spacer(Modifier.height(8.dp))
-            Surface(shape = RoundedCornerShape(11.dp), color = Surf,
-                border = BorderStroke(1.dp, LineC),
-                modifier = Modifier.fillMaxWidth().clickable {
-                    tlog = SharedFiles.buildLog() ?: "no log yet — send a build first"
-                }) {
-                Column(Modifier.padding(10.dp)) {
-                    Text("READ TERMUX LOG", color = Dim, fontSize = 9.sp, letterSpacing = 1.1.sp)
-                    Text("Tail of the last build Termux ran in the shared folder", color = Txt,
-                        fontSize = 11.sp)
-                }
-            }
-            tlog?.let { Text(it.takeLast(2500), color = Color(0xFF9FB2C9), fontSize = 9.5.sp,
-                fontFamily = FontFamily.Monospace, lineHeight = 13.sp) }
-        }
-        if (useTermux && !verdict.genuine) {
-            Text("Termux engine needs genuine Termux (F-Droid/GitHub). Home → Termux for setup.",
-                color = Amber, fontSize = 10.sp)
-        }
-
         Spacer(Modifier.height(12.dp))
         Pressable(
             onClick = {
@@ -278,23 +243,6 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {},
                 running = true
                 log = emptyList()
                 scope.launch {
-                    if (useTermux) {
-                        val script = TermuxBridge.scriptFor(p.name,
-                            p.steps.map { it.cmd })
-                        val sent = TermuxBridge.send(ctx, script, true)
-                        result = null
-                        log = listOf(
-                            Planner.LogLine("cmd", "Termux engine · ${p.steps.size} step(s)"),
-                            Planner.LogLine(if (sent) "ok" else "err",
-                                if (sent) "script sent to Termux — watch it there"
-                                else "Termux refused the intent: open Termux, allow external apps, retry"),
-                            Planner.LogLine("stop", "Termux writes the log to " + SharedFiles.DIR +
-                                "/last-build.log — tap Read Termux log below."),
-                            Planner.LogLine("stop", "Steps sent: ${p.steps.joinToString(" | ") { it.cmd }.take(400)}")
-                        )
-                        running = false
-                        return@launch
-                    }
                     val res = withContext(Dispatchers.IO) {
                         planner.build(p, store.memory(),
                             onLearn = { k, v -> store.rememberFix(k, v) })
@@ -337,7 +285,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {},
                                             modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp))
                                     }
                                 }
-                                if (r.done) Pill("done", Green)
+                                if (r.done) StatusPill("done", Pal.mint)
                             }
                         }
                         r.port?.let { p2 ->

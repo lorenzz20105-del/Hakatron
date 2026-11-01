@@ -102,7 +102,7 @@ fun TerminalScreen(ready: Boolean) {
 
     fun send1(text: String) { session?.write(text) }
 
-    Column(Modifier.fillMaxSize().background(Color(0xFF07080B))) {
+    Column(Modifier.fillMaxSize().background(Pal.ink)) {
         // ------------------------------------------------------------- header
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -119,14 +119,17 @@ fun TerminalScreen(ready: Boolean) {
                 modifier = Modifier.weight(1f, fill = false)
             )
             Spacer(Modifier.width(8.dp))
-            if (ready) Text(
-                if (mode == "pty") "pty" else "pipes",
-                color = if (mode == "pty") Green else Amber,
-                fontSize = 9.sp, fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .background(Color(0xFF14171F), RoundedCornerShape(5.dp))
-                    .padding(horizontal = 5.dp, vertical = 2.dp)
-            )
+            // Truthful about what this shell actually is: which userland, and
+            // whether it got a real pty. Never a vague "terminal ready" chip.
+            if (ready) {
+                val land = session?.userland ?: "alpine"
+                StatusPill(land + " · " + (if (land == "termux") "native" else "proot"),
+                    if (land == "termux") Cyan else Dim)
+                Spacer(Modifier.width(5.dp))
+                StatusPill(if (mode == "pty") "pty" else "pipes",
+                    if (mode == "pty") Green else Amber, filled = true)
+                Spacer(Modifier.width(6.dp))
+            }
             Spacer(Modifier.weight(1f))
             Text("A-", color = Dim, fontSize = 11.sp, modifier = Modifier.clickable {
                 fontSize = (fontSize - 1f).coerceIn(8f, 18f)
@@ -210,7 +213,7 @@ fun TerminalScreen(ready: Boolean) {
 
         // -------------------------------------------------------- extra keys
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-            .background(Color(0xFF0C0E13))
+            .background(Pal.ink)
             .padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             KeyCap("CTRL", active = ctrl) { ctrl = !ctrl }
