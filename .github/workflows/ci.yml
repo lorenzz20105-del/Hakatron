@@ -1,0 +1,60 @@
+name: CI
+
+# Hakatron's engine is pure Kotlin (Analyzer, Planner, KnowledgeBase, TreeReader),
+# so it can be tested and built without a device. This pipeline is the gate:
+# nothing ships unless the 42 rule tests and both assemble tasks pass.
+
+on:
+  push:
+    branches: [main]
+    tags: ["hakatron-*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Accept Android SDK licences
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Unit tests (engine rules, planner, tree reader)
+        run: ./gradlew :app:testReleaseUnitTest --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Build release APK (unsigned — the keystore stays out of git)
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Keep the test report whatever happened
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: app/build/reports/tests/testReleaseUnitTest
+          if-no-files-found: ignore
+
+      - name: Keep the APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn

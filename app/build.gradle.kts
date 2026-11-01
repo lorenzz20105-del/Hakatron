@@ -11,23 +11,26 @@ android {
         applicationId = "dev.devstudio.ide"
         minSdk = 24
         targetSdk = 34
-        versionCode = 12
-        versionName = "0.12.0"
+        versionCode = 14
+        versionName = "0.13.0"
         resourceConfigurations += listOf("en")
 
-        // The Linux engine ships real arm64 binaries (libproot / libglibc), and
-        // ML Kit's bundled OCR pipeline carries one .so per ABI. Keeping x86 and
-        // x86_64 copies of a 10 MB OCR library for emulators nobody runs this on
-        // added 17 MB to the APK for nothing.
-        ndk { abiFilters += listOf("arm64-v8a") }
+        // Universal APK on purpose: 0.12.0 shipped arm64-v8a only and was refused
+        // by 32-bit phones ("package appears to be invalid" — no matching ABI).
     }
 
+    // The release keystore is deliberately not in git. When it is missing (CI,
+    // a fresh clone) the release build still runs and produces an unsigned APK,
+    // so every change is verified by the pipeline instead of "works on my machine".
+    val keystoreFile = file("keystore/devstudio.jks")
     signingConfigs {
-        create("linuxdesk") {
-            storeFile = file("keystore/devstudio.jks")
-            storePassword = "devstudio"
-            keyAlias = "devstudio"
-            keyPassword = "devstudio"
+        if (keystoreFile.exists()) {
+            create("linuxdesk") {
+                storeFile = keystoreFile
+                storePassword = "devstudio"
+                keyAlias = "devstudio"
+                keyPassword = "devstudio"
+            }
         }
     }
 
@@ -35,7 +38,7 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("linuxdesk")
+            signingConfig = if (keystoreFile.exists()) signingConfigs.getByName("linuxdesk") else null
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
@@ -108,4 +111,9 @@ dependencies {
     // on-device OCR for "read a project tree from a screenshot" — bundled model,
     // no Play Services download at runtime, and nothing leaves the phone
     implementation("com.google.mlkit:text-recognition:16.0.0")
+
+    // JVM unit tests. The engine (Analyzer / Planner / KnowledgeBase / TreeReader)
+    // is pure Kotlin, so it is tested without an emulator.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.24")
 }

@@ -7,3 +7,4 @@ local.properties
 release/
 app/keystore/
 .kotlin/
+!gradle/wrapper/gradle-wrapper.jar

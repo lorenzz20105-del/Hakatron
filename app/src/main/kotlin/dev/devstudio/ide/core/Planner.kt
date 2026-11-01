@@ -125,11 +125,17 @@ class Planner(private val run: (String) -> String) {
 
         if (steps.none { it.kind == "run" }) {
             if (!steps.any { it.kind == "install" } && base.pip.isNotEmpty()) {
+                // `-r requirements.txt` only when that file actually lists something;
+                // an empty one would install nothing and leave the imports broken.
+                val req = base.files.firstOrNull { it.endsWith("requirements.txt") }
+                val reqBody = req?.let { contents[it] ?: contents.entries
+                    .firstOrNull { e -> e.key.endsWith("requirements.txt") }?.value } ?: ""
+                val usesFile = !req.isNullOrBlank() && reqBody.isNotBlank()
                 steps.add(0, Step("install",
-                    if (base.files.any { it.endsWith("requirements.txt") })
-                        "pip install --break-system-packages -r requirements.txt"
+                    if (usesFile) "pip install --break-system-packages -r requirements.txt"
                     else "pip install --break-system-packages ${base.pip.joinToString(" ")}",
-                    "python dependencies declared by the project"))
+                    if (usesFile) "python dependencies declared in requirements.txt"
+                    else "python dependencies found by reading the imports"))
             }
             if (base.npm.isNotEmpty() && base.files.any { it.endsWith("package.json") }) {
                 steps.add(Step("install", "npm install", "node dependencies in package.json"))

@@ -251,14 +251,36 @@ object KnowledgeBase {
         if (Regex("ERESOLVE|unable to resolve dependency tree").containsMatchIn(error))
             return Fix("npm_peer", null, augment = "--legacy-peer-deps",
                 why = "peer dependency conflict — npm 7+ refuses; legacy mode matches npm 6", confidence = 0.85)
-        if (Regex("could not connect to server|connection to server on socket .*failed|" +
-                "psycopg2\\.OperationalError|Is the server running locally|" +
-                "ECONNREFUSED|Connection refused").containsMatchIn(error))
-            return Fix("db_down",
-                "mkdir -p /run/postgresql && chown postgres:postgres /run/postgresql && " +
-                "su postgres -s /bin/sh -c 'pg_ctl -D /var/lib/postgresql/data -l /tmp/pg.log -w start'",
-                alt = listOf("initdb -D /var/lib/postgresql/data --auth=trust"),
-                why = "the database server isn't running inside the guest", confidence = 0.8)
+        // A refused connection is a *service* problem — and which service is decided
+        // by the port in the error, not by habit. Postgres on 5432, Redis on 6379,
+        // MariaDB/MySQL on 3306; anything else falls back to the project's own port.
+        val refused = Regex("ECONNREFUSED|Connection refused|could not connect to server|" +
+            "Is the server running|psycopg2\\.OperationalError|connection to server on socket .*failed")
+        if (refused.containsMatchIn(error)) {
+            val seen = Regex("(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0)[: ,]+(\\d{2,5})").find(error)
+                ?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("port (\\d{2,5})").find(error)?.groupValues?.get(1)?.toIntOrNull()
+            val p = seen ?: port ?: 5432
+            return when (p) {
+                6379 -> Fix("db_down", "apk add --no-cache redis && redis-server --daemonize yes",
+                    alt = listOf("redis-server --daemonize yes --save '' --appendonly no"),
+                    why = "port 6379 is Redis and nothing is listening inside the guest",
+                    confidence = 0.85)
+                3306 -> Fix("db_down",
+                    "apk add --no-cache mariadb mariadb-client && " +
+                        "mkdir -p /run/mysqld && chown -R mysql:mysql /run/mysqld /var/lib/mysql && " +
+                        "(mysql_install_db --user=mysql --datadir=/var/lib/mysql || true) && " +
+                        "mysqld_safe --datadir=/var/lib/mysql &",
+                    why = "port 3306 is MariaDB/MySQL and the server isn't running in the guest",
+                    confidence = 0.8)
+                else -> Fix("db_down",
+                    "mkdir -p /run/postgresql && chown postgres:postgres /run/postgresql && " +
+                        "su postgres -s /bin/sh -c 'pg_ctl -D /var/lib/postgresql/data -l /tmp/pg.log -w start'",
+                    alt = listOf("initdb -D /var/lib/postgresql/data --auth=trust"),
+                    why = "PostgreSQL (port $p) isn't running inside the guest",
+                    confidence = 0.8)
+            }
+        }
         if (Regex("could not find expected browser|Executable doesn't exist at|Chromium revision is not downloaded",
                 RegexOption.IGNORE_CASE).containsMatchIn(error))
             return Fix("browser", "apk add --no-cache chromium",
