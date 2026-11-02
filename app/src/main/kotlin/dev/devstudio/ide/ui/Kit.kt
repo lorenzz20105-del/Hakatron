@@ -70,6 +70,14 @@ object Pal {
 
     /** code text — the one colour every monospace block shares */
     val code = Color(0xFFA9B4C9)
+
+    /**
+     * Explorer glyph tones. A directory is warm (paper, a folder on a desk) and a file
+     * is cool, so the two never read as the same kind of row at a glance.
+     */
+    val folder = Color(0xFFF3E0B8)
+    val folderDeep = Color(0xFFD9BF8A)
+    val fileGlyph = Color(0xFF9AA6BE)
 }
 
 object Tok {

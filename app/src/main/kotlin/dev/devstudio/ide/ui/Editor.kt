@@ -1,6 +1,11 @@
 package dev.devstudio.ide.ui
 
 import android.util.Base64
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -136,11 +141,16 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
     var doc by remember { mutableStateOf(TextFieldValue("")) }
     var saved by remember { mutableStateOf("") }
     var output by remember { mutableStateOf("") }
-    var showFiles by remember { mutableStateOf(false) }
+    // the drawer from the reference: open over the editor, closed after a pick
+    var drawerOpen by remember { mutableStateOf(true) }
+    var expanded by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var fileActions by remember { mutableStateOf<String?>(null) }
+    var showFolder by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showMinimap by remember { mutableStateOf(false) }
     var showFind by remember { mutableStateOf(false) }
     var showNew by remember { mutableStateOf(false) }
     var showGit by remember { mutableStateOf(false) }
-    var search by remember { mutableStateOf("") }
     var wrap by remember { mutableStateOf(store.wordWrap()) }
     var fontSp by remember { mutableStateOf(store.editorFont().sp) }
     var running by remember { mutableStateOf(false) }
@@ -178,7 +188,13 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
     }
 
     fun refresh() {
-        scope.launch { files = withContext(Dispatchers.IO) { GuestFiles.list(run) } }
+        scope.launch {
+            val got = withContext(Dispatchers.IO) { GuestFiles.list(run) }
+            files = got
+            // a folder that appeared since the last look should start open, but a
+            // folder the user folded must stay folded — so this only ever *adds*
+            expanded = expanded + FileTree.defaultExpanded(got)
+        }
     }
 
     fun open(path: String, line: Int? = null) {
@@ -282,6 +298,15 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
         }
     }
 
+    LaunchedEffect(initialPath) {
+        // a caller can deep-link straight into a file (the search screen does)
+        val wanted = initialPath
+        if (wanted != null && wanted.isNotBlank()) {
+            refresh()
+            open(wanted)
+        }
+    }
+
     LaunchedEffect(Unit) {
         refresh()
         val kept = store.editorTabs()
@@ -297,87 +322,104 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
         store.setEditorActive(active)
     }
 
-    Column(Modifier.fillMaxSize().background(Pal.ink)) {
+    Box(Modifier.fillMaxSize().background(Pal.ink)) {
+      Column(Modifier.fillMaxSize()) {
 
         // ------------------------------------------------------------- header
         Row(
-            Modifier.fillMaxWidth().padding(start = 13.dp, end = 8.dp, top = 9.dp, bottom = 5.dp),
+            Modifier.fillMaxWidth().padding(start = 6.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                Modifier.size(width = 4.dp, height = 26.dp).background(
-                    Brush.verticalGradient(listOf(Pal.violet, Pal.violet.copy(alpha = 0.2f))),
-                    RoundedCornerShape(4.dp))
-            )
-            Spacer(Modifier.width(9.dp))
+            // the drawer handle. Everything about the files lives behind this one tap,
+            // which is what keeps the writing surface calm.
+            Pressable(onClick = { drawerOpen = !drawerOpen; if (drawerOpen) refresh() },
+                scaleDown = 0.92f) {
+                Box(
+                    Modifier.size(34.dp).clip(RoundedCornerShape(Tok.rS))
+                        .background(if (drawerOpen) Pal.violetSoft else Color.Transparent),
+                    contentAlignment = Alignment.Center
+                ) { Text("≡", color = if (drawerOpen) Pal.violet else Pal.dim, fontSize = 17.sp) }
+            }
+            Spacer(Modifier.width(4.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(Highlighter.titleOf(active ?: "Editor"), color = Pal.text,
-                        fontSize = 16.sp, fontWeight = FontWeight.Black,
+                        fontSize = 14.sp, fontWeight = FontWeight.Bold,
                         letterSpacing = (-0.2).sp, maxLines = 1)
-                    if (active != null) {
-                        Spacer(Modifier.width(6.dp))
-                        StatusPill(if (dirty) "modified" else "saved",
-                            if (dirty) Pal.amber else Pal.mint, filled = dirty)
+                    if (active != null && dirty) {
+                        Spacer(Modifier.width(5.dp))
+                        Box(Modifier.size(5.dp).clip(RoundedCornerShape(50))
+                            .background(Pal.amber))
                     }
                 }
-                Text(active?.substringBeforeLast('/', "") ?: "no file open",
-                    color = Pal.faint, fontSize = 9.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+                Text(
+                    active?.let { folderCrumb(it) } ?: projectNameOf(files),
+                    color = Pal.faint, fontSize = 9.sp, fontFamily = FontFamily.Monospace,
+                    maxLines = 1
+                )
             }
-            EditorPill("▤", if (showFiles) Pal.cyan else Pal.dim) { showFiles = !showFiles; refresh() }
-            Spacer(Modifier.width(5.dp))
             EditorPill("⌕", Pal.dim) { showFind = true }
-            Spacer(Modifier.width(5.dp))
+            Spacer(Modifier.width(4.dp))
             EditorPill("⑂", Pal.dim) { showGit = true }
-            Spacer(Modifier.width(5.dp))
+            Spacer(Modifier.width(4.dp))
+            EditorPill("▸", Pal.mint) { save(andRun = true) }
+            Spacer(Modifier.width(4.dp))
             EditorPill("＋", Pal.violet) { showNew = true }
         }
 
-        // tabs — pill chips; the active one carries the accent and a dirty dot
+        // tabs — file tabs, not pills: a tab is a page you are looking at, and the
+        // active one is the page in front. Same information as before, one shape closer
+        // to the reference.
         if (tabs.isNotEmpty()) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 10.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    .padding(start = 6.dp, end = 6.dp, top = 2.dp, bottom = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
             ) {
                 tabs.forEach { path ->
                     val on = path == active
                     val unsaved = if (on) dirty
                     else drafts[path]?.text?.let { it != (savedText[path] ?: it) } ?: false
-                    Pressable(onClick = { open(path) }, scaleDown = 0.95f) {
+                    val lang = FileTree.lang(Highlighter.titleOf(path))
+                    Pressable(onClick = { open(path) }, scaleDown = 0.97f) {
                         Row(
-                            Modifier.clip(RoundedCornerShape(50))
-                                .background(if (on) Pal.violetSoft else Pal.surface)
-                                .border(
-                                    if (on) 1.dp else 0.dp,
-                                    if (on) Pal.violet.copy(alpha = 0.5f) else Color.Transparent,
-                                    RoundedCornerShape(50)
+                            Modifier
+                                .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp,
+                                    bottomStart = 3.dp, bottomEnd = 3.dp))
+                                .background(if (on) EditorSurface else Pal.surface)
+                                .then(
+                                    if (on) Modifier
+                                        .padding(top = 0.dp) else Modifier
                                 )
-                                .padding(start = 10.dp, end = if (on) 6.dp else 10.dp,
-                                    top = 5.dp, bottom = 5.dp),
+                                .padding(start = 9.dp,
+                                    end = if (on) 4.dp else 9.dp, top = 7.dp, bottom = 7.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (unsaved) {
-                                Box(Modifier.size(5.dp).clip(RoundedCornerShape(50))
-                                    .background(Pal.amber))
-                                Spacer(Modifier.width(5.dp))
-                            }
+                            Text(lang.badge.ifEmpty { "·" }, color = lang.tone,
+                                fontSize = 8.sp, fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace)
+                            Spacer(Modifier.width(6.dp))
                             Text(Highlighter.titleOf(path),
                                 color = if (on) Pal.text else Pal.dim,
-                                fontSize = 10.5.sp,
-                                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 11.sp,
+                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
                                 maxLines = 1)
+                            if (unsaved) {
+                                Spacer(Modifier.width(5.dp))
+                                Box(Modifier.size(4.5.dp).clip(RoundedCornerShape(50))
+                                    .background(Pal.amber))
+                            }
                             if (on) {
                                 Spacer(Modifier.width(6.dp))
                                 Box(
-                                    Modifier.size(16.dp).clip(RoundedCornerShape(50))
+                                    Modifier.size(16.dp).clip(RoundedCornerShape(4.dp))
                                         .clickable {
                                             val dirtyTab = drafts[path]?.text
                                                 ?.let { it != (savedText[path] ?: it) } ?: false
                                             if (dirtyTab) confirmClose = path else closeTab(path)
                                         },
                                     contentAlignment = Alignment.Center
-                                ) { Text("×", color = Pal.dim, fontSize = 12.sp) }
+                                ) { Text("×", color = Pal.dim, fontSize = 11.sp) }
                             }
                         }
                     }
@@ -385,116 +427,20 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             }
         }
 
-        // ----------------------------------------------------------- explorer
-        //
-        // The old "Files" sheet was a flat list under a search box. This is the
-        // panel an editor actually has: a header with a new-file button, indented
-        // paths so folder depth is visible, and the open file marked.
-        if (showFiles) {
-            TCard(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
-                tone = Pal.surface, radius = Tok.rM, glow = Pal.cyan
-            ) {
-                Column {
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 11.dp, end = 8.dp, top = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("EXPLORER", color = Pal.faint, fontSize = 7.5.sp,
-                            letterSpacing = 1.1.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.weight(1f))
-                        Text("${files.size} file(s)", color = Pal.faint, fontSize = 8.5.sp)
-                        Spacer(Modifier.width(7.dp))
-                        Box(
-                            Modifier.size(22.dp).clip(RoundedCornerShape(7.dp))
-                                .background(Pal.violetSoft).clickable { showNew = true },
-                            contentAlignment = Alignment.Center
-                        ) { Text("＋", color = Pal.violet, fontSize = 11.sp) }
-                    }
-                    BasicTextField(
-                        value = search, onValueChange = { search = it }, singleLine = true,
-                        textStyle = TextStyle(fontSize = 11.sp, color = Pal.text,
-                            fontFamily = FontFamily.Monospace),
-                        decorationBox = { inner ->
-                            Box(
-                                Modifier.fillMaxWidth().padding(8.dp)
-                                    .clip(RoundedCornerShape(Tok.rS)).background(Pal.ink)
-                                    .padding(horizontal = 10.dp, vertical = 8.dp)
-                            ) {
-                                if (search.isEmpty()) Text("find a file…", color = Pal.faint,
-                                    fontSize = 10.5.sp, fontFamily = FontFamily.Monospace)
-                                inner()
-                            }
-                        }
-                    )
-                    LazyColumn(Modifier.heightIn(max = 250.dp).padding(bottom = 6.dp)) {
-                        val shown = files.filter { search.isBlank() || it.contains(search, true) }
-                        if (shown.isEmpty()) item {
-                            Text(
-                                if (files.isEmpty()) "no files yet — ＋ creates one, or build a project"
-                                else "nothing matches \"$search\"",
-                                color = Pal.faint, fontSize = 10.sp,
-                                lineHeight = 14.sp,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
-                            )
-                        }
-                        items(shown) { f ->
-                            val depth = (f.count { it == '/' } - 1).coerceIn(0, 4)
-                            val on = f == active
-                            Row(
-                                Modifier.fillMaxWidth()
-                                    .background(if (on) Pal.violetSoft else Color.Transparent)
-                                    .clickable { open(f); showFiles = false }
-                                    .padding(start = (12 + depth * 9).dp, end = 10.dp,
-                                        top = 7.dp, bottom = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(if (on) "●" else "·",
-                                    color = if (on) Pal.violet else Pal.faint, fontSize = 8.sp)
-                                Spacer(Modifier.width(6.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(Highlighter.titleOf(f), color = if (on) Pal.text else Pal.text,
-                                        fontSize = 11.sp, fontFamily = FontFamily.Monospace,
-                                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
-                                        maxLines = 1)
-                                    Text(f.substringBeforeLast('/', ""), color = Pal.faint,
-                                        fontSize = 8.sp, maxLines = 1,
-                                        fontFamily = FontFamily.Monospace)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // breadcrumbs — the VS Code habit: always know where the caret lives
-        val pathShown = active
-        if (pathShown != null) Breadcrumbs(pathShown, compact = wrap)
+        // the caret's address is in the header (folderCrumb), so the page itself stays
+        // clean exactly as in the reference
 
         // ------------------------------------------------------------- editor
         Box(Modifier.weight(1f).fillMaxWidth().background(EditorSurface)) {
-            // the activity rail sits on the leading edge, the minimap on the trailing
-            if (active != null && !bigFile && !wrap) {
+            // the minimap is off by default — the reference has none — and the gear in
+            // the drawer turns it on for people who want it
+            if (showMinimap && active != null && !bigFile && !wrap) {
                 Minimap(
                     lines = lines,
                     scroll = vs.value,
                     viewportPx = screenPx,
                     lineHeight = lineHeight,
                     modifier = Modifier.align(Alignment.TopEnd)
-                )
-            }
-            if (active != null) {
-                ActivityRail(
-                    onFiles = { showFiles = !showFiles; refresh() },
-                    onSearch = { showSearch = true },
-                    onGit = { showGit = true },
-                    onProblems = { panelTab = 0 },
-                    onOutput = { panelTab = 1 },
-                    onRun = { save(andRun = true) },
-                    filesOpen = showFiles,
-                    panelTab = panelTab,
-                    modifier = Modifier.align(Alignment.CenterStart)
                 )
             }
             if (active == null) {
@@ -519,7 +465,7 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Box(Modifier.weight(1f)) {
                             ActionTile("▤", "Open a file", "${files.size} in the guest", Pal.cyan) {
-                                showFiles = true; refresh()
+                                drawerOpen = true; refresh()
                             }
                         }
                         Box(Modifier.weight(1f)) {
@@ -835,6 +781,116 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             showSearch = false
             open("~/projects/$path", line)
         }, onClose = { showSearch = false })
+    }
+    if (showFolder) {
+        var name by remember { mutableStateOf("") }
+        HkDialog(
+            title = "New folder",
+            sub = "inside ~/projects",
+            onDismiss = { showFolder = false },
+            accent = Pal.cyan,
+            confirmLabel = "Create",
+            confirmTone = Pal.cyan,
+            onConfirm = {
+                val clean = name.trim().trim('/')
+                if (clean.isNotEmpty()) {
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            GuestFiles.mkdir(run, "~/projects/$clean")
+                        }
+                        refresh()
+                        showFolder = false
+                    }
+                }
+            }
+        ) {
+            HkField(name, { name = it }, hint = "cheto/app/src")
+            Text("folders are made with mkdir -p, so a whole path works in one go",
+                color = Pal.faint, fontSize = 9.5.sp)
+        }
+    }
+    if (showSettings) {
+        EditorSettings(
+            fontSp = fontSp,
+            wrap = wrap,
+            minimap = showMinimap,
+            onFont = { fontSp = it; store.setEditorFont(it.value.toInt()) },
+            onWrap = { wrap = it; store.setWordWrap(it) },
+            onMinimap = { showMinimap = it },
+            onClose = { showSettings = false }
+        )
+    }
+    fileActions?.let { path ->
+        FileActions(
+            path = path,
+            onOpen = { fileActions = null; open(path) },
+            onRename = { to ->
+                scope.launch {
+                    withContext(Dispatchers.IO) { GuestFiles.rename(run, path, to) }
+                    val wasActive = active == path
+                    tabs = tabs.map { if (it == path) to else it }
+                    refresh()
+                    fileActions = null
+                    if (wasActive) open(to)
+                }
+            },
+            onDelete = {
+                scope.launch {
+                    withContext(Dispatchers.IO) { GuestFiles.delete(run, path) }
+                    tabs = tabs - path
+                    drafts.remove(path)
+                    savedText.remove(path)
+                    if (active == path) {
+                        active = null
+                        doc = TextFieldValue("")
+                        saved = ""
+                    }
+                    refresh()
+                    fileActions = null
+                }
+            },
+            onClose = { fileActions = null }
+        )
+    }
+
+      // ------------------------------------------------------------- the drawer
+      //
+      // Drawn last, so it sits above the page. The strip of editor that shows past the
+      // drawer is a scrim: tapping it closes the drawer, tapping the drawer does not.
+      AnimatedVisibility(
+          visible = drawerOpen,
+          enter = slideInHorizontally(animationSpec = Motion.spatial()) { -it } + fadeIn(),
+          exit = slideOutHorizontally(animationSpec = Motion.spatial()) { -it } + fadeOut()
+      ) {
+          Row(Modifier.fillMaxSize()) {
+              ExplorerDrawer(
+                  project = projectNameOf(files, "Projects"),
+                  paths = files,
+                  expanded = expanded,
+                  active = active,
+                  isDirty = { p ->
+                      drafts[p]?.text?.let { it != (savedText[p] ?: it) } ?: Vfs.dirty(p)
+                  },
+                  onOpen = { p ->
+                      open(p)
+                      drawerOpen = false
+                  },
+                  onToggle = { dir ->
+                      expanded = if (dir in expanded) expanded - dir else expanded + dir
+                  },
+                  onNewFile = { showNew = true },
+                  onNewFolder = { showFolder = true },
+                  onSettings = { showSettings = true },
+                  onFileActions = { p -> fileActions = p },
+                  modifier = Modifier.fillMaxHeight().fillMaxWidth(drawerWidth())
+              )
+              Box(
+                  Modifier.weight(1f).fillMaxHeight()
+                      .background(Color.Black.copy(alpha = 0.35f))
+                      .clickable { drawerOpen = false }
+              )
+          }
+      }
     }
 }
 
@@ -1397,4 +1453,187 @@ private fun CodeField(value: TextFieldValue, onEdit: (TextFieldValue) -> Unit,
                                else SyntaxTransform(lang),
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None)
     )
+}
+
+/* ------------------------------------------------- editor settings + file actions */
+
+/**
+ * The gear in the drawer.
+ *
+ * Three things live here because they are the three things a phone editor actually
+ * needs: how big the text is, whether long lines fold, and whether the minimap is
+ * drawn. Each one applies immediately — no "apply" button, because a preview you have
+ * to dismiss is a preview you cannot judge.
+ */
+@Composable
+private fun EditorSettings(
+    fontSp: androidx.compose.ui.unit.TextUnit,
+    wrap: Boolean,
+    minimap: Boolean,
+    onFont: (androidx.compose.ui.unit.TextUnit) -> Unit,
+    onWrap: (Boolean) -> Unit,
+    onMinimap: (Boolean) -> Unit,
+    onClose: () -> Unit
+) {
+    HkDialog(
+        title = "Editor",
+        sub = "text size, wrapping, minimap",
+        onDismiss = onClose,
+        accent = Pal.cyan,
+        confirmLabel = "Done",
+        confirmTone = Pal.cyan,
+        dismissLabel = null,
+        onConfirm = onClose
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Text size", color = Pal.text, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                StepButton("−") {
+                    onFont((fontSp.value - 1f).coerceIn(9f, 22f).sp)
+                }
+                Text("${fontSp.value.toInt()} sp", color = Pal.cyan, fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.width(52.dp), textAlign = TextAlign.Center)
+                StepButton("＋") {
+                    onFont((fontSp.value + 1f).coerceIn(9f, 22f).sp)
+                }
+            }
+            ToggleRow("Wrap long lines", wrap, "long lines fold instead of scrolling sideways",
+                Pal.violet, onWrap)
+            ToggleRow("Minimap", minimap, "a column of the whole file on the right edge",
+                Pal.cyan, onMinimap)
+            Text(
+                "Highlighting switches itself off above 1,500 lines — a per-frame colour pass " +
+                    "on a phone would make typing lag, and a lagging editor is worse than a plain one.",
+                color = Pal.faint, fontSize = 9.5.sp, lineHeight = 14.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun StepButton(glyph: String, onClick: () -> Unit) {
+    Pressable(onClick = onClick, scaleDown = 0.9f) {
+        Box(
+            Modifier.size(30.dp).clip(RoundedCornerShape(Tok.rS)).background(Pal.surface2),
+            contentAlignment = Alignment.Center
+        ) { Text(glyph, color = Pal.text, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+    }
+}
+
+@Composable
+private fun ToggleRow(
+    label: String,
+    on: Boolean,
+    hint: String,
+    tone: Color,
+    onChange: (Boolean) -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(Tok.rS))
+            .clickable { onChange(!on) }.padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Pal.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(hint, color = Pal.faint, fontSize = 9.sp, maxLines = 2)
+        }
+        Spacer(Modifier.width(8.dp))
+        Box(
+            Modifier.size(width = 38.dp, height = 22.dp)
+                .clip(RoundedCornerShape(50))
+                .background(if (on) tone else Pal.surface3),
+            contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart
+        ) {
+            Box(
+                Modifier.padding(horizontal = 3.dp).size(16.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(if (on) Pal.ink else Pal.faint)
+            )
+        }
+    }
+}
+
+/**
+ * Long-press on a file in the drawer.
+ *
+ * Rename and delete go through the guest shell (`mv`, `rm -rf`) rather than through a
+ * second file API, so what the drawer shows and what `ls` shows can never disagree.
+ * Deleting asks for the name to be typed, because there is no undo for a file.
+ */
+@Composable
+private fun FileActions(
+    path: String,
+    onOpen: () -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: () -> Unit,
+    onClose: () -> Unit
+) {
+    val ctx = LocalContext.current
+    var mode by remember { mutableStateOf(0) }        // 0 menu · 1 rename · 2 delete
+    var typed by remember { mutableStateOf(path) }
+    val name = path.substringAfterLast('/')
+
+    HkDialog(
+        title = when (mode) {
+            1 -> "Rename"
+            2 -> "Delete for good?"
+            else -> name
+        },
+        sub = when (mode) {
+            0 -> path
+            1 -> "the whole path, so it can move folder too"
+            else -> "type the file name to confirm"
+        },
+        onDismiss = onClose,
+        accent = if (mode == 2) Pal.rose else Pal.violet,
+        confirmLabel = when (mode) { 1 -> "Rename"; 2 -> "Delete"; else -> "Open" },
+        confirmTone = if (mode == 2) Pal.rose else Pal.violet,
+        onConfirm = {
+            when (mode) {
+                1 -> if (typed.trim().isNotEmpty() && typed.trim() != path) onRename(typed.trim())
+                2 -> if (typed.trim() == name) onDelete()
+                else -> onOpen()
+            }
+        }
+    ) {
+        if (mode == 0) {
+            ActionRow("⌕", "Open in a tab", Pal.cyan) { onOpen() }
+            ActionRow("✎", "Rename or move", Pal.violet) { mode = 1 }
+            ActionRow("⧉", "Copy the path", Pal.mint) {
+                runCatching {
+                    val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("path", path))
+                }
+                onClose()
+            }
+            ActionRow("✖", "Delete", Pal.rose) { mode = 2 }
+        } else {
+            HkField(typed, { typed = it }, hint = "path")
+            if (mode == 2) {
+                Text(
+                    "This runs `rm -rf` in the guest. There is no undo and no bin.",
+                    color = Pal.rose, fontSize = 10.sp, lineHeight = 14.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionRow(glyph: String, label: String, tone: Color, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(Tok.rS))
+            .clickable(onClick = onClick).padding(vertical = 7.dp, horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(26.dp).clip(RoundedCornerShape(8.dp))
+                .background(tone.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center
+        ) { Text(glyph, color = tone, fontSize = 12.sp) }
+        Spacer(Modifier.width(10.dp))
+        Text(label, color = Pal.text, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+    }
 }
