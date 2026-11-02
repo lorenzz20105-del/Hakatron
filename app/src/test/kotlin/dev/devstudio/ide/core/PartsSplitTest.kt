@@ -156,3 +156,89 @@ class PartsSplitTest {
         assertEquals(once.toText(), twice.toText())
     }
 }
+
+/**
+ * The screenshot-of-a-chat case: the OCR text starts with the model's preamble
+ * ("V deepseek", "I need all in one go", "Thought for 6 seconds", "Project Tree",
+ * "0 Copy") before the real files. 0.17.0 named that preamble `main.cs` and it was
+ * the only part visible, so an eight-file paste looked like one block.
+ */
+class ChatPreambleTest {
+
+    private val pasted = """
+        V deepseek
+        "I need all in one go
+        Thought for 6 seconds >
+        IDE Bot - Complete Package (One Drop)
+        Everything: build files, all sources, tests, README. Copy these into a fresh project and it builds.
+        Project Tree
+        0 Copy
+        text
+        IDEBotAutomation/
+        settings.gradle.kts
+        build.gradle
+
+        === app/src/main/kotlin/App.kt ===
+        package com.exam.idebot
+        import androidx.compose.runtime.Composable
+        class App
+
+        === editor/EditorSurface.kt ===
+        package com.exam.idebot.editor
+        class EditorSurface
+
+        === model/Action.kt ===
+        package com.exam.idebot.model
+        data class Action(val id: String)
+
+        === core/TriggerBus.kt ===
+        package com.exam.idebot.core
+        class TriggerBus
+
+        === core/UndoManager.kt ===
+        package com.exam.idebot.core
+        class UndoManager
+
+        === storage/RuleDao.kt ===
+        package com.exam.idebot.storage
+        class RuleDao
+
+        === ui/RuleListScreen.kt ===
+        package com.exam.idebot.ui
+        class RuleListScreen
+    """.trimIndent()
+
+    @Test
+    fun `the chat preamble is not a file`() {
+        val s = Parts.split(pasted)
+        assertTrue(s.files.none { it == "main.cs" }, s.files.toString())
+        assertTrue(s.files.none { it.contains("paste") }, s.files.toString())
+        assertTrue(s.dropped >= 1, "preamble was kept as a part")
+    }
+
+    @Test
+    fun `all seven real files survive`() {
+        val s = Parts.split(pasted)
+        assertEquals(7, s.count, s.files.toString())
+        assertTrue(s.files.contains("App.kt") || s.files.contains("app/src/main/kotlin/App.kt"),
+            s.files.toString())
+        assertTrue(s.files.any { it.endsWith("EditorSurface.kt") }, s.files.toString())
+    }
+
+    @Test
+    fun `prose without a header is prose`() {
+        assertTrue(Parts.isProse("V deepseek\nI need all in one go\nThought for 6 seconds >"))
+        assertTrue(Parts.isProse("Everything: build files, all sources, tests, README."))
+        assertTrue(!Parts.isProse("package a\nclass B { }"))
+        assertTrue(!Parts.isProse("fn main() { println!(\"x\"); }"))
+    }
+
+    @Test
+    fun `chat noise lines are recognised`() {
+        assertTrue(Parts.isChatNoise("V deepseek"))
+        assertTrue(Parts.isChatNoise("Thought for 6 seconds >"))
+        assertTrue(Parts.isChatNoise("0 Copy"))
+        assertTrue(Parts.isChatNoise("Project Tree"))
+        assertTrue(!Parts.isChatNoise("class App"))
+    }
+}

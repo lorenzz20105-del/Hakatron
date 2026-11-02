@@ -33,7 +33,7 @@ object Parts {
         val inferred: Boolean = false
     )
 
-    data class Split(val parts: List<Part>, val headerCount: Int) {
+    data class Split(val parts: List<Part>, val headerCount: Int, val dropped: Int = 0) {
         val count: Int get() = parts.size
         val files: List<String> get() = parts.map { it.path }
 
@@ -280,15 +280,23 @@ object Parts {
     // ---------------------------------------------------------------- naming
 
     private fun finish(blocks: List<Pair<String?, String>>, headers: Int): Split {
+        var dropped = 0
         val cleaned = blocks.mapNotNull { (given, body) ->
             val text = body.trim('\n')
             if (text.isBlank() && given == null) return@mapNotNull null
+            // A block with no header that is just prose or chat is not a file. It is
+            // dropped and counted, never smuggled in as `main.cs`.
+            val hasRealHeader = given != null && !isPlaceholder(given)
+            if (!hasRealHeader && isProse(text)) {
+                dropped++
+                return@mapNotNull null
+            }
             val lang = languageOf(text)
             val path = (given?.takeIf { it.isNotBlank() && !isPlaceholder(it) }
                 ?: inferName(text, lang))
             Part(path, text, lang, inferred = given == null || isPlaceholder(given))
         }
-        if (cleaned.isEmpty()) return Split(emptyList(), headers)
+        if (cleaned.isEmpty()) return Split(emptyList(), headers, dropped)
         // unique names, so two `main.kt` blocks cannot overwrite each other
         val used = HashMap<String, Int>()
         val unique = cleaned.map { p ->
@@ -296,7 +304,48 @@ object Parts {
             used[p.path] = n
             if (n == 1) p else p.copy(path = addSuffix(p.path, n))
         }
-        return Split(unique, headers)
+        return Split(unique, headers, dropped)
+    }
+
+    /**
+     * Chat furniture and prose that a screenshot of a conversation drags in with it.
+     * These lines used to end up as a "file" called `main.cs` holding the whole
+     * preamble, which made an 8-file paste look like one part.
+     */
+    private val CHAT_NOISE = listOf(
+        Regex("^(V\\s+)?(deepseek|chatgpt|gemini|claude|copilot|grok)\\b", RegexOption.IGNORE_CASE),
+        Regex("^thought for\\s+\\d+", RegexOption.IGNORE_CASE),
+        Regex("^\\d+\\s*(copy|copies)$", RegexOption.IGNORE_CASE),
+        Regex("^(copy|text|plaintext|project tree|tree|output|answer)$", RegexOption.IGNORE_CASE),
+        Regex("i need all in one", RegexOption.IGNORE_CASE),
+        Regex("complete package|one drop|everything:.*readme", RegexOption.IGNORE_CASE),
+        Regex("^copy these into", RegexOption.IGNORE_CASE),
+        Regex("^(here is|here's|sure[,!]|okay[,!]|below is)\\b", RegexOption.IGNORE_CASE),
+        Regex("^(would you like|let me know|hope this helps)", RegexOption.IGNORE_CASE)
+    )
+
+    fun isChatNoise(line: String): Boolean {
+        val t = line.trim()
+        if (t.isEmpty()) return false
+        return CHAT_NOISE.any { it.containsMatchIn(t) }
+    }
+
+    /**
+     * A block is prose, not a file, when nothing in it is code and most lines read
+     * like sentences. One or two stray words ("V deepseek") are enough to reject a
+     * block that carries no structure at all.
+     */
+    fun isProse(body: String): Boolean {
+        val lines = body.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return true
+        // chat lines containing ">" or "(" look like code to a token check, so they
+        // are excluded before the code count — that was why a preamble survived.
+        val chatLines = lines.count { isChatNoise(it) }
+        val codeLines = lines.count { !isChatNoise(it) && looksLikeCode(it) }
+        if (chatLines > 0 && codeLines == 0) return true
+        if (codeLines > 0) return false
+        val wordyLines = lines.count { it.split(' ').size >= 4 }
+        return wordyLines.toFloat() / lines.size >= 0.5f
     }
 
     /** `paste_here.kt` and friends are placeholders, not file names. */

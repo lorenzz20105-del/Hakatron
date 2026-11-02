@@ -258,46 +258,79 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                 PasteField(fixedParts, { parts = it }, 7,
                     "Paste one file, several files, or a whole project — it is split for you.")
 
-                // What the splitter found, shown before anything is planned.
-                Row(Modifier.fillMaxWidth().padding(top = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
+                // What the splitter found — every part named, not just counted.
+                // 0.16.x put the whole paste in one block, and even after the split
+                // was added, the parts were only listed in a compressed line.
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     StatusPill(
                         when (split.count) {
                             0 -> "no code yet"
-                            1 -> "1 file"
-                            else -> "${split.count} files"
+                            1 -> "1 part"
+                            else -> "${split.count} parts"
                         },
                         if (split.count > 1) Pal.mint else Pal.faint,
                         filled = split.count > 1
                     )
                     Spacer(Modifier.width(7.dp))
                     Text(
-                        if (split.count == 0) "paste code below and the files appear here"
-                        else split.files.joinToString(" · "),
-                        color = Pal.dim, fontSize = 9.5.sp, maxLines = 2,
-                        modifier = Modifier.weight(1f)
+                        when {
+                            split.count == 0 -> "paste code and the files appear here"
+                            split.count == 1 -> split.parts[0].path
+                            split.headerCount == 0 -> "names inferred from the code"
+                            else -> "${split.headerCount} header(s) found"
+                        },
+                        color = Pal.faint, fontSize = 9.sp
                     )
+                    if (split.dropped > 0) {
+                        Spacer(Modifier.width(7.dp))
+                        StatusPill("${split.dropped} chat block(s) ignored", Pal.amber)
+                    }
                 }
-                if (split.count > 1 || (split.count == 1 && split.parts[0].inferred)) {
+                if (split.count > 0) {
                     Spacer(Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        if (split.toText() != parts) {
-                            Pressable(onClick = { parts = split.toText() }, scaleDown = 0.95f) {
-                                Box(Modifier.clip(RoundedCornerShape(50)).background(Pal.violetSoft)
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                    Text("Write the ${split.count} file header(s)",
-                                        color = Pal.violet, fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold)
+                    Column(
+                        Modifier.fillMaxWidth().heightIn(max = 190.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        split.parts.forEachIndexed { i, part ->
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clip(RoundedCornerShape(Tok.rS))
+                                    .background(Pal.surface)
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    Modifier.size(18.dp).clip(RoundedCornerShape(6.dp))
+                                        .background(partTone(part.lang).copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("${i + 1}", color = partTone(part.lang), fontSize = 8.5.sp,
+                                        fontWeight = FontWeight.Black)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(part.path, color = Pal.text, fontSize = 10.5.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold, maxLines = 1)
+                                    Text(
+                                        "${part.lang} · ${part.body.lines().count { it.isNotBlank() }} lines" +
+                                            (if (part.inferred) " · name inferred" else ""),
+                                        color = Pal.faint, fontSize = 8.sp, maxLines = 1
+                                    )
                                 }
                             }
                         }
-                        Text(
-                            if (split.headerCount == 0) "names inferred from the code"
-                            else "${split.headerCount} header(s) found",
-                            color = Pal.faint, fontSize = 9.sp,
-                            modifier = Modifier.align(Alignment.CenterVertically)
-                        )
                     }
+                }
+                if (split.count > 0 && split.toText() != parts) {
+                    Spacer(Modifier.height(6.dp))
+                    GlowButton(
+                        text = "Write ${split.count} file header(s)",
+                        from = Pal.violet, to = Pal.cyan
+                    ) { parts = split.toText() }
                 }
 
                 SectionLabel("3 · BUILD NOTES (optional but powerful)")
@@ -558,6 +591,19 @@ private fun PlanCard(p: Planner.Plan) {
             }
         }
     }
+}
+
+/** Colour per language, so the parts list is scannable rather than uniform. */
+private fun partTone(lang: String): Color = when (lang) {
+    "kotlin" -> Pal.violet
+    "java" -> Pal.rose
+    "python" -> Pal.cyan
+    "rust" -> Pal.amber
+    "go" -> Pal.mint
+    "javascript", "typescript" -> Pal.amber
+    "html", "css" -> Pal.cyan
+    "shell" -> Pal.mint
+    else -> Pal.dim
 }
 
 @Composable
