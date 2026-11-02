@@ -57,6 +57,51 @@ object TreeOcr {
         }.start()
     }
 
+    /**
+     * Reads **several** screenshots of one capture.
+     *
+     * A long file does not fit on one screen, so people take two or three shots that
+     * overlap. Each is decoded on the same worker thread, then the raw texts are
+     * joined by their shared lines ([OcrShape.stitchAll]) before parsing — otherwise
+     * the seam lines show up twice and the tree comes back with phantom entries.
+     * The returned [TreeReader.Result.rawText] is the stitched text.
+     */
+    fun readMany(
+        ctx: Context,
+        uris: List<Uri>,
+        onProgress: (Progress) -> Unit = {},
+        onResult: (TreeReader.Result?, String?) -> Unit
+    ) {
+        if (uris.isEmpty()) { onResult(null, "no image was picked"); return }
+        Thread {
+            val out = runCatching {
+                var stitched = ""
+                var shots = 0
+                for ((i, uri) in uris.withIndex()) {
+                    val one = decode(ctx, uri) { p ->
+                        // report the whole pick, not each image as if it were the first
+                        onProgress(Progress(i * 100 + p.done, uris.size * 100))
+                    }
+                    stitched = OcrShape.stitchAll(listOf(stitched, one.rawText))
+                    shots++
+                }
+                val joined = OcrShape.block(stitched)
+                val parsed = TreeReader.parse(joined.text)
+                parsed.copy(
+                    rawText = joined.text,
+                    report = joined,
+                    shots = shots
+                )
+            }
+            val res = out.getOrNull()
+            val err = out.exceptionOrNull()?.let { it.message ?: "could not read that image" }
+            main.post {
+                if (res != null) onResult(res, if (res.ok) null else res.reason)
+                else onResult(null, err ?: "could not read that image")
+            }
+        }.start()
+    }
+
     private fun decode(ctx: Context, uri: Uri, onProgress: (Progress) -> Unit): TreeReader.Result {
         val cr = ctx.contentResolver
 

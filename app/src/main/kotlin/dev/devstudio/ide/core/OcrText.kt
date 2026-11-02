@@ -65,11 +65,15 @@ object OcrText {
         // a hyphen broken by a space: "gradle -wrapper" → "gradle-wrapper"
         line = Regex("(\\w)[ ]+-[ ]?(?=\\w)").replace(line) { m -> m.groupValues[1] + "-" }
         // a word split in two: "Automat ion" (first part ≥4 letters, second ≤3)
+        //
+        // The tail has to actually be a suffix. Joining on "short word" alone turned
+        // "make app" into "makeapp" and "test run" into "testrun" — prose mangled by
+        // a rule meant for identifiers. A suffix list is the honest test.
         line = Regex("\\b(\\p{L}{4,})[ ]+(\\p{L}{1,3})\\b(?=[^\\p{L}]|$)").replace(line) { m ->
             val head = m.groupValues[1]
             val tail = m.groupValues[2]
-            // only join when the tail cannot stand alone: it is a suffix, not a word
-            if (tail.lowercase() in STANDALONE) m.value else head + tail
+            val low = tail.lowercase()
+            if (low in STANDALONE || low !in SUFFIX) m.value else head + tail
         }
         // space before punctuation
         line = Regex("[ ]+([,;:)\\]}])").replace(line, "$1")
@@ -168,11 +172,27 @@ object OcrText {
         return out
     }
 
+    /**
+     * The only two-or-three letter tails a broken word can end in. This is what makes
+     * "Automat ion" → "Automation" safe while "make app" stays two words.
+     */
+    private val SUFFIX = setOf(
+        // only endings that are never a word on their own
+        "ion", "ing", "ity", "ive", "ies", "ial", "ian", "ied", "ise", "ize", "ish",
+        "ent", "ant", "ure", "acy", "ery", "ary", "ory", "ate", "ble", "ous", "ful",
+        "ism", "ist", "est", "ess", "age", "ade", "ely", "ily", "ment", "ness",
+        "less", "ance", "ence", "able", "ible", "tion", "sion", "ical", "ular",
+        "ed", "er", "or", "ly", "es", "al", "ic", "ty", "ry", "cy", "ss", "ff",
+        "pp", "tt", "ck", "sh", "ch", "th", "gh", "ph", "ng", "nt", "ct", "pt", "ll"
+    )
+
     /** Short words that are real words, so `repair` must not weld them onto the previous one. */
     private val STANDALONE = setOf(
         "a", "an", "i", "is", "it", "if", "in", "of", "on", "or", "to", "up", "we", "as",
         "at", "be", "by", "do", "go", "he", "my", "no", "so", "us", "the", "and", "for",
-        "you", "not", "all", "one", "two", "run", "new", "old", "get", "set", "add", "raw"
+        "you", "not", "all", "one", "two", "run", "new", "old", "get", "set", "add", "raw",
+        "me", "my", "its", "our", "her", "his", "him", "was", "are", "can", "may", "use",
+        "out", "off", "own", "put", "way", "who", "why", "how", "yes", "few", "far"
     )
 
     /**

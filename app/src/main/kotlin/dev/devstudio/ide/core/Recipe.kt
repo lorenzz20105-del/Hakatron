@@ -62,6 +62,8 @@ object Recipe {
             Brain.Intent.WebStatic -> webStatic(name, description)
             Brain.Intent.NodeApi -> nodeApi(name, description)
             Brain.Intent.CNative -> cNative(name, description)
+            Brain.Intent.RustCli -> rustCli(name, description)
+            Brain.Intent.GoCli -> goCli(name, description)
             else -> null
         }
     }
@@ -495,5 +497,138 @@ object Recipe {
             guestBuild = "make",
             limit = null
         )
+    }
+
+    // --------------------------------------------------------------------- rust
+    /**
+     * A Cargo binary. `cargo` is not installed in the guest by default, and pulling
+     * it is a 300 MB download, so [guestBuild] is empty and [limit] names `rustc`
+     * as the shortcut when the user has it — never a claim that this already builds.
+     */
+    private fun rustCli(name: String, description: String): Scaffold {
+        val title = title(description, name)
+        val files = linkedMapOf(
+            "Cargo.toml" to """
+                [package]
+                name = "$name"
+                version = "0.1.0"
+                edition = "2021"
+
+                [dependencies]
+            """.trimIndent() + "\n",
+            "src/main.rs" to """
+                // $title — written by Devos from your description.
+                // Cargo expects the entry point here: src/main.rs.
+                use std::env;
+
+                fn main() {
+                    let args: Vec<String> = env::args().skip(1).collect();
+                    if args.is_empty() {
+                        println!("$name — pass something to work on");
+                        println!("usage: $name <text>...");
+                        return;
+                    }
+                    for (i, arg) in args.iter().enumerate() {
+                        println!("{}. {}", i + 1, arg);
+                    }
+                }
+            """.trimIndent() + "\n",
+            "README.md" to """
+                # $title
+
+                $description
+
+                ## Build
+
+                ```
+                cargo build --release
+                ./target/release/$name hello world
+                ```
+
+                Devos wrote this in the guest, which has no Rust toolchain. Install one
+                with `rustup` (or `pkg install rust` where available) and the commands
+                above work unchanged.
+            """.trimIndent() + "\n"
+        )
+        return Scaffold(
+            intent = Brain.Intent.RustCli,
+            name = name,
+            files = files,
+            guestBuild = "",
+            limit = "the guest has no Rust toolchain — install rustup (or `pkg install rust`) " +
+                "and this builds with no changes",
+            elsewhere = "cargo run -- <args>  ·  rustc src/main.rs -o $name"
+        )
+    }
+
+    // ----------------------------------------------------------------------- go
+    /**
+     * A `go mod init` project with a stdlib-only `main.go`. Go is a single tarball
+     * download and compiles in the guest once it is there, so [guestBuild] names the
+     * command that works *after* the toolchain is installed, and [limit] says which
+     * part is missing rather than pretending.
+     */
+    private fun goCli(name: String, description: String): Scaffold {
+        val title = title(description, name)
+        val module = "dev.devos.$name".replace("-", "")
+        val files = linkedMapOf(
+            "go.mod" to """
+                module $module
+
+                go 1.22
+            """.trimIndent() + "\n",
+            "main.go" to """
+                // $title — written by Devos from your description.
+                package main
+
+                import (
+                	"fmt"
+                	"os"
+                	"strings"
+                )
+
+                func main() {
+                	args := os.Args[1:]
+                	if len(args) == 0 {
+                		fmt.Println("$name — pass something to work on")
+                		fmt.Println("usage: $name <text>...")
+                		return
+                	}
+                	fmt.Println(strings.Join(args, " "))
+                }
+            """.trimIndent() + "\n",
+            "README.md" to """
+                # $title
+
+                $description
+
+                ## Build
+
+                ```
+                go build -o $name .
+                ./$name hello world
+                ```
+
+                Devos wrote this in the guest, which has no Go toolchain yet. Install one
+                (`wget` the tarball from go.dev, or `pkg install golang`) and `go build`
+                works unchanged.
+            """.trimIndent() + "\n"
+        )
+        return Scaffold(
+            intent = Brain.Intent.GoCli,
+            name = name,
+            files = files,
+            guestBuild = "",
+            limit = "the guest has no Go toolchain — install it from go.dev, then `go build` " +
+                "works with no changes",
+            elsewhere = "go build -o $name ."
+        )
+    }
+
+    /** A readable title for a description: first sentence, caught, trimmed. */
+    private fun title(description: String, name: String): String {
+        val first = description.trim().split(Regex("[.\n]")).firstOrNull()?.trim().orEmpty()
+        val t = first.ifBlank { name }
+        return t.replaceFirstChar { it.uppercase() }.take(70)
     }
 }

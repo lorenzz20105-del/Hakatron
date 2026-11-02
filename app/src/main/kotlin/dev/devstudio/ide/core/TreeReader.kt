@@ -30,7 +30,11 @@ object TreeReader {
         /** Why it was rejected, when it was. Null when it parsed cleanly. */
         val reason: String? = null,
         /** The raw OCR text, so the caller can offer it to the parts box instead. */
-        val rawText: String = ""
+        val rawText: String = "",
+        /** What the OCR repair did to the capture, and what it is unsure about. */
+        val report: OcrShape.Report? = null,
+        /** How many screenshots were stitched into this result. */
+        val shots: Int = 1
     ) {
         /**
          * A tree needs *tree structure*: either box-drawing marks, or names that look

@@ -31,6 +31,7 @@ import dev.devstudio.ide.core.Analyzer
 import dev.devstudio.ide.core.Brain
 import dev.devstudio.ide.core.Devos
 import dev.devstudio.ide.core.Parts
+import dev.devstudio.ide.core.OcrShape
 import dev.devstudio.ide.core.Planner
 import dev.devstudio.ide.core.Recipe
 import dev.devstudio.ide.core.Store
@@ -85,26 +86,34 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                 onHostFix = { cmd -> Engine.applyHostFix(cmd) })
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    // Several screenshots at once: a long file does not fit on one screen, and the
+    // shots usually overlap. TreeOcr stitches them by their shared lines, then
+    // OcrShape repairs the block and tells us what it is not sure about.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
         ocrBusy = true
         ocrProg = ""
         ocrNote = null
-        TreeOcr.read(ctx, uri, onProgress = { p -> ocrProg = "strip ${p.done}/${p.total}" }) { res, err ->
+        TreeOcr.readMany(ctx, uris, onProgress = { p -> ocrProg = "strip ${p.done / 100 + 1}" }) { res, err ->
             ocrBusy = false
             ocrProg = ""
+            val notes = res?.report?.let { OcrShape.summary(it) }.orEmpty()
             if (res != null && res.ok) {
                 structure = res.structure
                 ocrNote = "read ${res.entries} entries" + (res.root?.let { " under $it" } ?: "") +
-                    " · ${(res.confidence * 100).toInt()}% sure it is a tree — check it"
+                    " · ${(res.confidence * 100).toInt()}% sure it is a tree — check it" +
+                    (if (res.shots > 1) " · stitched ${res.shots} screenshots" else "") +
+                    (if (notes.isNotBlank()) " · $notes" else "")
             } else {
                 // A screenshot of source code is not a tree, but it *is* the parts.
                 val recovered = res?.rawText?.takeIf { it.isNotBlank() }?.let { Devos.divide(it, ocr = true) }
                 if (recovered != null && recovered.count > 0) {
                     parts = recovered.toText()
                     fromScreenshot = true
-                    ocrNote = "that image was code, not a tree — moved it into the parts as " +
-                        "${recovered.count} file(s): ${recovered.files.joinToString(", ")}"
+                    ocrNote = "that was code, not a tree — moved it into the parts as " +
+                        "${recovered.count} file(s): ${recovered.files.joinToString(", ")}" +
+                        (if ((res?.shots ?: 1) > 1) " · stitched ${res!!.shots} screenshots" else "") +
+                        (if (notes.isNotBlank()) " · $notes" else "")
                 } else {
                     ocrNote = err ?: "could not read that image"
                 }

@@ -163,9 +163,12 @@ object Parts {
         var text = raw.replace("\r\n", "\n").trim('\n')
         if (text.isBlank()) return Split(emptyList(), 0)
 
-        // ---- 0. OCR-only clean-up: repair words, drop chat furniture, lift the tree
+        // ---- 0. OCR-only clean-up: normalise look-alikes, strip an editor gutter,
+        // rebuild lost indentation, repair words, drop chat furniture, lift the tree.
+        // Block-level first: the per-line repair cannot see that the numbers down the
+        // left edge are a gutter, or that the whole capture lost its indentation.
         if (ocr) {
-            text = OcrText.clean(text)
+            text = OcrShape.block(text).text
         }
         var dropped = 0
         val treeLines = ArrayList<String>()

@@ -98,7 +98,27 @@ class RecipeTest {
     @Test
     fun `an intent devos cannot scaffold returns nothing rather than a stub`() {
         assertNull(Recipe.scaffold(Brain.Intent.Unknown, "something"))
-        assertNull(Recipe.scaffold(Brain.Intent.RustCli, "a rust tool"))
+    }
+
+    @Test
+    fun `rust ships a cargo project and admits the toolchain is missing`() {
+        val s = Recipe.scaffold(Brain.Intent.RustCli, "a rust tool called sortr")!!
+        assertEquals("sortr", s.name)
+        assertTrue(s.files["Cargo.toml"]!!.contains("name = \"sortr\""))
+        assertTrue(s.files.containsKey("src/main.rs"), s.files.keys.toString())
+        assertTrue(s.files["src/main.rs"]!!.contains("fn main()"))
+        assertEquals("", s.guestBuild, "cargo is not in the guest")
+        assertTrue(s.limit!!.contains("Rust"), s.limit!!)
+    }
+
+    @Test
+    fun `go ships a module and a stdlib main`() {
+        val s = Recipe.scaffold(Brain.Intent.GoCli, "a go tool called grab")!!
+        assertEquals("grab", s.name)
+        assertTrue(s.files["go.mod"]!!.startsWith("module dev.devos.grab"))
+        assertTrue(s.files["main.go"]!!.contains("package main"))
+        assertTrue(!s.files["main.go"]!!.contains("github.com/"), "no third-party deps")
+        assertTrue(s.limit!!.contains("Go"), s.limit!!)
     }
 
     @Test
