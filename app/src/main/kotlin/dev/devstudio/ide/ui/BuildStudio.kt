@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.devstudio.ide.Engine
 import dev.devstudio.ide.core.Analyzer
+import dev.devstudio.ide.core.Devos
 import dev.devstudio.ide.core.Parts
 import dev.devstudio.ide.core.Planner
 import dev.devstudio.ide.core.Store
@@ -66,6 +67,9 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
     var ocrProg by remember { mutableStateOf("") }
     var ocrNote by remember { mutableStateOf<String?>(null) }
     var stepNow by remember { mutableStateOf("") }
+    var memTick by remember { mutableStateOf(0) }
+    // true once a screenshot has been read into the parts — used to explain the source
+    var fromScreenshot by remember { mutableStateOf(false) }
 
     // "this is source code, not a project tree" — detected, not guessed at run time
     val structureIsCode = remember(structure) { Analyzer.isSourceCode(structure) }
@@ -90,9 +94,10 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     " · ${(res.confidence * 100).toInt()}% sure it is a tree — check it"
             } else {
                 // A screenshot of source code is not a tree, but it *is* the parts.
-                val recovered = res?.rawText?.takeIf { it.isNotBlank() }?.let { Parts.split(it) }
+                val recovered = res?.rawText?.takeIf { it.isNotBlank() }?.let { Devos.divide(it, ocr = true) }
                 if (recovered != null && recovered.count > 0) {
                     parts = recovered.toText()
+                    fromScreenshot = true
                     ocrNote = "that image was code, not a tree — moved it into the parts as " +
                         "${recovered.count} file(s): ${recovered.files.joinToString(", ")}"
                 } else {
@@ -102,11 +107,12 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
         }
     }
 
-    // Every paste is split into the files it contains — 0.16.1 put the whole project
-    // in one `=== paste_here.kt ===` block, which is why the plan was nonsense.
-    val split = remember(parts, structure) { Parts.split(parts) }
-    var memTick by remember { mutableStateOf(0) }
+    // Devos is the one who divides. This is the only intake path in the UI: the
+    // paste goes in, Devos returns files plus the evidence for each one. OCR text
+    // is already cleaned by the time it lands here, so it is not cleaned twice.
+    val split = remember(parts) { Devos.divide(parts) }
     var showRaw by remember { mutableStateOf(false) }
+    var showDivide by remember { mutableStateOf(true) }
     var selectedPart by remember { mutableStateOf(0) }
     val fixedParts = remember(parts, split) { if (split.count > 0) split.toText() else parts }
 
@@ -260,6 +266,13 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     count = if (split.count > 0) split.count else null,
                     tone = if (split.count > 1) Pal.mint else Pal.faint
                 )
+                DevosIntakeCard(
+                    intake = split,
+                    fromScreenshot = fromScreenshot,
+                    expanded = showDivide,
+                    onExpand = { showDivide = it }
+                )
+                Spacer(Modifier.height(8.dp))
                 PartsPanel(
                     split = split,
                     raw = fixedParts,
@@ -500,6 +513,86 @@ private fun ResultCard(r: Planner.Result, onPreview: (String) -> Unit) {
     }
 }
 
+/**
+ * Devos divided this — shown, not assumed.
+ *
+ * The old screen printed "8 files" from a chip and a single text box that said
+ * "one part". This card is the answer: one row per file with the evidence that
+ * produced it, the confidence of the whole intake, and every doubt listed as a
+ * question before Analyze is allowed to run.
+ */
+@Composable
+private fun DevosIntakeCard(
+    intake: Devos.Intake,
+    fromScreenshot: Boolean,
+    expanded: Boolean,
+    onExpand: (Boolean) -> Unit
+) {
+    if (intake.empty) return
+    val severe = intake.questions.any { it.severe }
+    val tone = if (severe) Pal.amber else Pal.mint
+    TCard(Modifier.fillMaxWidth().padding(top = 4.dp), tone = Pal.surface, radius = Tok.rM,
+        border = tone.copy(alpha = 0.32f)) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(24.dp).clip(RoundedCornerShape(8.dp)).background(tone.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center
+                ) { Text("D", color = tone, fontSize = 11.sp, fontWeight = FontWeight.Black) }
+                Spacer(Modifier.width(9.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Devos divided this", color = Pal.text, fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold)
+                    Text(
+                        (if (fromScreenshot) "from a screenshot · " else "") +
+                            "${(intake.confidence * 100).toInt()}% sure · ${intake.summary()}",
+                        color = Pal.dim, fontSize = 9.5.sp, maxLines = 2
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
+                Pressable(onClick = { onExpand(!expanded) }, scaleDown = 0.95f) {
+                    StatusPill(if (expanded) "hide" else "why?", tone)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(Devos.verdict(intake), color = Pal.text, fontSize = 10.sp, lineHeight = 15.sp)
+
+            if (expanded) {
+                Spacer(Modifier.height(8.dp))
+                intake.decisions.forEach { d ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                        Box(
+                            Modifier.padding(top = 4.dp).size(5.dp).clip(RoundedCornerShape(50))
+                                .background(if (d.how == "named") Pal.mint else Pal.amber)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text(d.path, color = Pal.text, fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                            Text(d.why, color = Pal.faint, fontSize = 9.sp, lineHeight = 13.sp)
+                        }
+                    }
+                }
+                if (intake.questions.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    HkSection(null, "Before you build", tone = if (severe) Pal.amber else Pal.cyan,
+                        topSpace = 4.dp)
+                    intake.questions.forEach { q ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                            Text(if (q.severe) "!" else "·",
+                                color = if (q.severe) Pal.amber else Pal.cyan,
+                                fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.width(12.dp))
+                            Text(q.ask, color = if (q.severe) Pal.text else Pal.dim,
+                                fontSize = 9.5.sp, lineHeight = 14.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** A small dot + sentence-case caption — never an uppercase tracked label. */
 @Composable
 private fun Caption(text: String, tone: Color) {
@@ -695,7 +788,7 @@ private fun SegText(text: String, on: Boolean, onClick: () -> Unit) {
  */
 @Composable
 private fun PartsPanel(
-    split: Parts.Split,
+    split: Devos.Intake,
     raw: String,
     onRaw: (String) -> Unit,
     showRaw: Boolean,
