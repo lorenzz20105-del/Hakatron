@@ -28,9 +28,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.devstudio.ide.Engine
 import dev.devstudio.ide.core.Analyzer
+import dev.devstudio.ide.core.Brain
 import dev.devstudio.ide.core.Devos
 import dev.devstudio.ide.core.Parts
 import dev.devstudio.ide.core.Planner
+import dev.devstudio.ide.core.Recipe
 import dev.devstudio.ide.core.Store
 import dev.devstudio.ide.core.TreeOcr
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +59,9 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
 
     var tab by remember { mutableStateOf(0) }              // 0 compose · 1 plan · 2 log
     var structure by remember { mutableStateOf("") }
+    // the user's own words — what Brain reads when nothing is pasted
+    var describe by remember { mutableStateOf("") }
+    var scaffold by remember { mutableStateOf<Recipe.Scaffold?>(null) }
     var parts by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
     var plan by remember { mutableStateOf<Planner.Plan?>(null) }
@@ -121,7 +126,8 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
         val body = if (split.count > 0) split.toText() else parts
         if (body != parts) parts = body
         plan = planner.recall(
-            planner.plan("project", structure, body, notes),
+            planner.plan("project", structure, body, notes,
+                description = describe, brain = store.brain()),
             store.recipes().map { Planner.Recall(it.name, it.stack, it.steps) }
         )
         log = emptyList()
@@ -202,6 +208,77 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     fontSize = 9.5.sp, lineHeight = 14.sp,
                     modifier = Modifier.padding(top = 6.dp)
                 )
+
+                HkSection(null, "Describe it, Devos builds it",
+                    "no paste needed — Devos writes the project", tone = Pal.cyan)
+                HkField(
+                    value = describe, onChange = { describe = it },
+                    hint = "make me a todo app for android called Focus · a flask api · a landing page",
+                    mono = false, singleLine = false, minLines = 2, maxLines = 4
+                )
+                Spacer(Modifier.height(7.dp))
+                val guess = remember(describe) {
+                    if (describe.isBlank()) null else Brain.predict(describe, weights = store.brain())
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (guess == null) {
+                        Text("Devos reads this and chooses the whole project shape.",
+                            color = Pal.faint, fontSize = 9.5.sp, modifier = Modifier.weight(1f))
+                    } else {
+                        StatusPill(
+                            guess.intent.label,
+                            if (guess.intent == Brain.Intent.Unknown) Pal.amber else Pal.cyan,
+                            filled = true
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            if (guess.intent == Brain.Intent.Unknown)
+                                "not sure yet — say what it is (an android app, a script, a web api)"
+                            else "${(guess.confidence * 100).toInt()}% · " +
+                                guess.evidence.take(3).joinToString(" ") { "${it.first}+${it.second}" },
+                            color = Pal.faint, fontSize = 9.sp, maxLines = 2,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(7.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GlowButton(
+                        text = if (guess != null && guess.intent == Brain.Intent.Android)
+                            "Write the Android project" else "Write the project",
+                        from = Pal.cyan, to = Pal.mint,
+                        enabled = guess != null && guess.intent != Brain.Intent.Unknown
+                    ) {
+                        val g = guess ?: return@GlowButton
+                        val sc = Recipe.scaffold(g.intent, describe)
+                        if (sc == null) return@GlowButton
+                        scaffold = sc
+                        parts = Planner(run = { "" }).scaffoldToParts(sc)
+                        if (structure.isBlank()) structure = sc.name + "/\n" +
+                            sc.files.keys.joinToString("\n") { "├── $it" }
+                        log = emptyList(); result = null; plan = null
+                    }
+                    if (describe.isNotBlank()) GhostButton("Clear") { describe = "" }
+                }
+                scaffold?.let { sc ->
+                    Spacer(Modifier.height(7.dp))
+                    TCard(Modifier.fillMaxWidth(), tone = Pal.surface2, radius = Tok.rM) {
+                        Column(Modifier.padding(11.dp)) {
+                            Text("Devos wrote ${sc.files.size} file(s)", color = Pal.text,
+                                fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            sc.limit?.let {
+                                Spacer(Modifier.height(4.dp))
+                                Text(it, color = Pal.amber, fontSize = 9.5.sp, lineHeight = 14.sp)
+                                sc.elsewhere?.let { cmd ->
+                                    Spacer(Modifier.height(3.dp))
+                                    Text(cmd, color = Pal.faint, fontSize = 9.sp,
+                                        fontFamily = FontFamily.Monospace)
+                                }
+                            }
+                        }
+                    }
+                }
 
                 HkSection(0, "Start from a template", "one tap fills all three steps")
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -308,7 +385,8 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                 DevosMemoryCard(
                     fixes = remember(memTick) { store.fixCount() },
                     recipes = remember(memTick) { store.recipes().size },
-                    onForget = { store.forgetFixes(); memTick++ }
+                    weights = remember(memTick) { store.brainSize() },
+                    onForget = { store.forgetFixes(); store.forgetBrain(); memTick++ }
                 )
                 Spacer(Modifier.height(12.dp))
                 GlowButton(
@@ -365,6 +443,21 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                                         }
                                         result = res
                                         log = res.log
+                                        // the model learns from the outcome: if the build
+                                        // failed on a stack that is not the one Devos guessed,
+                                        // nudge the weights toward the one the files really are
+                                        if (p.intent != Brain.Intent.Unknown) {
+                                            val actual = Brain.predict(
+                                                structure + " " + p.contents.values.joinToString("\n").take(400),
+                                                p.files, store.brain())
+                                            if (actual.intent != Brain.Intent.Unknown &&
+                                                actual.intent != p.intent && !res.ok) {
+                                                store.saveBrain(Brain.learn(
+                                                    store.brain(),
+                                                    Brain.features(describe + " " + structure, p.files),
+                                                    actual.intent, p.intent, rate = 0.4))
+                                            }
+                                        }
                                         stepNow = ""
                                         running = false
                                         store.saveRecipe(p.name, p.stack,
@@ -683,7 +776,7 @@ private fun StopCard(r: Planner.Result) {
  * admitted that it existed.
  */
 @Composable
-private fun DevosMemoryCard(fixes: Int, recipes: Int, onForget: () -> Unit) {
+private fun DevosMemoryCard(fixes: Int, recipes: Int, weights: Int, onForget: () -> Unit) {
     TCard(Modifier.fillMaxWidth(), tone = Pal.surface, radius = Tok.rM) {
         Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -695,10 +788,10 @@ private fun DevosMemoryCard(fixes: Int, recipes: Int, onForget: () -> Unit) {
             Column(Modifier.weight(1f)) {
                 Text("Devos memory", color = Pal.text, fontSize = 11.5.sp,
                     fontWeight = FontWeight.SemiBold)
-                Text("$fixes fix(es) remembered · $recipes recipe(s) · all on this phone",
+                Text("$fixes fix(es) · $recipes recipe(s) · $weights learned weight(s) · on this phone",
                     color = Pal.faint, fontSize = 9.5.sp, maxLines = 2)
             }
-            if (fixes > 0) {
+            if (fixes > 0 || weights > 0) {
                 Spacer(Modifier.width(8.dp))
                 GhostButton("Forget") { onForget() }
             }
@@ -714,6 +807,16 @@ private fun PlanCard(p: Planner.Plan) {
     TCard(Modifier.fillMaxWidth(), tone = Pal.surface, radius = Tok.rM) {
         Column(Modifier.padding(14.dp)) {
             Caption("Best match", Pal.violet)
+            if (p.intent != Brain.Intent.Unknown) {
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(bottom = 2.dp)) {
+                    Text("Devos read this as: ", color = Pal.faint, fontSize = 9.5.sp)
+                    Text(p.intent.label, color = Pal.cyan, fontSize = 9.5.sp,
+                        fontWeight = FontWeight.SemiBold)
+                    Text(" · ${(p.intentConfidence * 100).toInt()}%", color = Pal.faint,
+                        fontSize = 9.5.sp)
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(p.label, color = Pal.text, fontSize = 17.sp, fontWeight = FontWeight.Black)
                 if (p.recalledFrom != null) {

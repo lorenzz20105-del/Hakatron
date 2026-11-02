@@ -45,6 +45,22 @@ class Store(ctx: Context) {
         prefs.edit().putString("fix_memory", o.toString()).apply()
     }
 
+    // ------------------------------------------------------------ brain weights
+    /** The weight table Brain learned on this device. Empty on a fresh install. */
+    fun brain(): Map<Brain.Intent, Map<String, Double>> =
+        Brain.decode(prefs.getString("brain_weights", "") ?: "")
+
+    fun saveBrain(weights: Map<Brain.Intent, Map<String, Double>>) {
+        prefs.edit().putString("brain_weights", Brain.encode(weights)).apply()
+    }
+
+    fun forgetBrain() {
+        prefs.edit().remove("brain_weights").apply()
+    }
+
+    /** How many weight entries the model holds — shown next to the fix count. */
+    fun brainSize(): Int = brain().values.sumOf { it.size }
+
     fun forgetFixes() {
         prefs.edit().remove("fix_memory").apply()
     }

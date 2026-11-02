@@ -38,11 +38,40 @@ class Planner(
         /** set when the plan must not be executed, with the reason a human can act on */
         val blocked: String? = null,
         /** the recipe this plan was warmed from — its steps are the ones that worked here */
-        val recalledFrom: String? = null
+        val recalledFrom: String? = null,
+        /** what Devos believes it is building, and how sure it is */
+        val intent: Brain.Intent = Brain.Intent.Unknown,
+        val intentConfidence: Double = 0.0,
+        /** the evidence behind that belief, for the UI to show */
+        val intentEvidence: List<Pair<String, Double>> = emptyList()
     )
 
     /** A build this device already proved, as recipes are stored. */
     data class Recall(val name: String, val stack: String, val steps: List<String>)
+
+    // --------------------------------------------------------------- scaffold
+    /**
+     * Devos writes the project when the user described one instead of pasting one.
+     *
+     * Only fires when there is a description *and* nothing to build: a user who
+     * pasted files does not want them replaced by a scaffold. The description is
+     * what Brain already used to decide the intent, so the two agree by
+     * construction.
+     */
+    fun scaffoldFor(description: String, structure: String, parts: String): Recipe.Scaffold? {
+        if (description.isBlank()) return null
+        if (parts.isNotBlank() || structure.isNotBlank()) return null
+        val guess = Brain.predict(description)
+        if (guess.intent == Brain.Intent.Unknown) return null
+        if (guess.confidence < 0.35) return null
+        return Recipe.scaffold(guess.intent, description)
+    }
+
+    /** The canonical `=== path ===` paste form of a scaffold, ready for [plan]. */
+    fun scaffoldToParts(scaffold: Recipe.Scaffold): String =
+        scaffold.files.entries.joinToString("\n\n") { (p, body) ->
+            "=== $p ===\n" + body.trimEnd()
+        }
 
     // ---------------------------------------------------------------- recall
     /**
@@ -178,11 +207,28 @@ class Planner(
     }
 
     // ----------------------------------------------------------------- plan
-    fun plan(name: String, structure: String, parts: String, notes: String): Plan {
+    fun plan(
+        name: String,
+        structure: String,
+        parts: String,
+        notes: String,
+        /** the user's own words, when they described the app instead of pasting it */
+        description: String = "",
+        /** weights Brain learned on this device */
+        brain: Map<Brain.Intent, Map<String, Double>> = emptyMap()
+    ): Plan {
         val parsed = Analyzer.readStructure(structure)
         val contents: Map<String, String> = if (parts.contains("===") || parts.contains("```"))
             Analyzer.readBundle(parts) else partsToMap(parsed.files, parts)
         val base = Analyzer.analyze(parsed.files, parsed.dirs, contents)
+
+        // What is Devos being asked to build? The files first (they cannot lie), then
+        // the user's own words. This is the model's one job — and it is shown, not hidden.
+        val guess = Brain.predict(
+            description.ifBlank { notes } + " " + structure.replace(Regex("[├└│─]"), " "),
+            parsed.files + contents.keys.toList(),
+            brain
+        )
 
         val noteMap = parseNotes(notes)
         val steps = ArrayList<Step>()
@@ -275,7 +321,9 @@ class Planner(
             confidence = base.confidence, evidence = base.evidence, steps = keptSteps,
             predictions = predictions, issues = issues, pip = base.pip, npm = base.npm,
             files = base.files, contents = contents, port = base.port, runCmd = base.run,
-            ecosystem = eco?.first, blocked = blocked)
+            ecosystem = eco?.first, blocked = blocked,
+            intent = guess.intent, intentConfidence = guess.confidence,
+            intentEvidence = guess.evidence)
     }
 
     private fun partsToMap(files: List<String>, parts: String): Map<String, String> =
