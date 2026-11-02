@@ -33,12 +33,31 @@ object Parts {
         val inferred: Boolean = false
     )
 
-    data class Split(val parts: List<Part>, val headerCount: Int) {
+    data class Split(
+        val parts: List<Part>,
+        val headerCount: Int,
+        /** A project tree found inside the same text — belongs in step 1, not in a file. */
+        val tree: String = "",
+        /** Lines thrown away as chat furniture or preamble. */
+        val dropped: Int = 0
+    ) {
         val count: Int get() = parts.size
         val files: List<String> get() = parts.map { it.path }
 
         /** The canonical text the planner reads: `=== path ===` then the body. */
         fun toText(): String = parts.joinToString("\n\n") { "=== ${it.path} ===\n${it.body.trimEnd()}" }
+
+        /** Rewrites one part's body and returns the canonical text. */
+        fun withBody(index: Int, body: String): String = parts.mapIndexed { i, p ->
+            if (i == index) p.copy(body = body) else p
+        }.joinToString("\n\n") { "=== ${it.path} ===\n${it.body.trimEnd()}" }
+
+        /** Drops one part and returns the canonical text. */
+        fun without(index: Int): String = parts.filterIndexed { i, _ -> i != index }
+            .joinToString("\n\n") { "=== ${it.path} ===\n${it.body.trimEnd()}" }
+
+        /** Total lines across every part — the number the header shows. */
+        val totalLines: Int get() = parts.sumOf { p -> p.body.lines().count { it.isNotBlank() } }
 
         /** One line for the UI: "4 files · app.py, main.rs, Cargo.toml, Dockerfile". */
         fun summary(): String = when (count) {
@@ -113,26 +132,88 @@ object Parts {
         "FROM ", "RUN ", "COPY ", "services:", "version:", "[package]", "[dependencies]"
     )
 
-    fun split(raw: String): Split {
-        val text = raw.replace("\r\n", "\n").trim('\n')
+    fun split(raw: String, ocr: Boolean = false): Split {
+        var text = raw.replace("\r\n", "\n").trim('\n')
         if (text.isBlank()) return Split(emptyList(), 0)
+
+        // ---- 0. OCR-only clean-up: repair words, drop chat furniture, lift the tree
+        if (ocr) {
+            text = OcrText.clean(text)
+        }
+        var dropped = 0
+        val treeLines = ArrayList<String>()
+        val kept = ArrayList<String>()
+        var inTree = false
+        text.lines().forEach { line ->
+            val t = line.trim()
+            if (ocr && OcrText.isChatNoise(t)) { dropped++; return@forEach }
+            val isTree = OcrText.isTreeLine(t) ||
+                (inTree && t.isNotEmpty() && !t.contains(' ') && t.endsWith("/"))
+            if (isTree) {
+                treeLines.add(t); inTree = true; return@forEach
+            }
+            inTree = false
+            kept.add(line)
+        }
+        val tree = treeLines.joinToString("\n")
+
+        // ---- 0b. preamble: prose above the first header.
+        // In OCR mode a prose line can look like code ("IDE Bot - Complete Package
+        // (One Drop)" has parentheses), so the first *header* wins when one exists
+        // anywhere in the text; code-ish lines are only the fallback.
+        var start = 0
+        if (ocr) {
+            val firstHeader = kept.indexOfFirst { l ->
+                val t = l.trim()
+                HEADER_EQ.matches(t) || HEADER_DASH.matches(t) || FENCE.matches(t)
+            }
+            if (firstHeader > 0) {
+                start = firstHeader
+                dropped += kept.take(start).count { it.isNotBlank() }
+            }
+        }
+        while (start < kept.size) {
+            val t = kept[start].trim()
+            if (t.isEmpty()) { start++; continue }
+            if (HEADER_EQ.matches(t) || HEADER_DASH.matches(t) || FENCE.matches(t)) break
+            if (PATH_LINE.matches(t) || looksLikeCode(t)) break
+            dropped++; start++
+        }
+        text = kept.drop(start).joinToString("\n").trim('\n')
+        if (text.isBlank()) return Split(emptyList(), 0, tree, dropped)
 
         // 1 — explicit `=== path ===` headers
         val explicit = sections(text, HEADER_EQ)
-        if (explicit.size > 1) return finish(explicit.map { it.first to it.second }, explicit.size)
+        if (explicit.size > 1)
+            return finish(explicit.map { it.first to it.second }, explicit.size, tree, dropped)
+        // one header is still a header — unless its body carries another one, in
+        // which case the heuristic below has more to find
+        if (explicit.size == 1 && explicit[0].first != null && !hasNestedHeader(explicit[0].second))
+            return finish(explicit.map { it.first to it.second }, 1, tree, dropped)
 
         // 2 — markdown fences that name a path
         val fenced = fencedSections(text)
-        if (fenced.size > 1) return finish(fenced, fenced.count { it.first != null })
+        if (fenced.size > 1) return finish(fenced, fenced.count { it.first != null }, tree, dropped)
 
         // 3/4 — headers by shape, then by "a new file starts here"
         val blocks = heuristic(text)
         val headers = blocks.count { it.first != null }
         if (blocks.size <= 1) {
             val body = blocks.firstOrNull()?.second ?: text
-            return finish(listOf((null to body)), headers)
+            return finish(listOf((null to body)), headers, tree, dropped)
         }
-        return finish(blocks, headers)
+        return finish(blocks, headers, tree, dropped)
+    }
+
+    /** True when a body carries its own `path`+`language` (or `===`) header. */
+    private fun hasNestedHeader(body: String): Boolean {
+        val lines = body.lines()
+        if (lines.any { HEADER_EQ.matches(it.trim()) || HEADER_DASH.matches(it.trim()) }) return true
+        return lines.indices.any { i ->
+            val t = lines[i].trim()
+            PATH_LINE.matches(t) && !looksLikeCode(t) &&
+                lines.getOrNull(i + 1)?.trim()?.lowercase() in LANGUAGE_WORDS
+        }
     }
 
     /** Splits on `=== path ===` style markers; the text before the first one is kept. */
@@ -199,6 +280,12 @@ object Parts {
         while (i < lines.size) {
             val line = lines[i]
             val trimmed = line.trim()
+
+            // ---- header: === path === (when a single one survived step 1)
+            val eq = HEADER_EQ.matchEntire(line)
+            if (eq != null) {
+                cut(); name = cleanName(eq.groupValues[1]); i++; continue
+            }
 
             // ---- header: a bare path line, optionally followed by a bare language line
             if (trimmed.isNotEmpty() && PATH_LINE.matches(trimmed) && !looksLikeCode(trimmed)) {
@@ -279,16 +366,25 @@ object Parts {
 
     // ---------------------------------------------------------------- naming
 
-    private fun finish(blocks: List<Pair<String?, String>>, headers: Int): Split {
+    private fun finish(
+        blocks: List<Pair<String?, String>>,
+        headers: Int,
+        tree: String = "",
+        dropped: Int = 0
+    ): Split {
         val cleaned = blocks.mapNotNull { (given, body) ->
             val text = body.trim('\n')
-            if (text.isBlank() && given == null) return@mapNotNull null
+            // A header with nothing under it is a phantom file: the tree in a chat
+            // answer produced seven of these, so the count said "8 files" while the
+            // parts box showed one.
+            if (text.isBlank()) return@mapNotNull null
+            if (text.lines().count { it.isNotBlank() } == 0) return@mapNotNull null
             val lang = languageOf(text)
             val path = (given?.takeIf { it.isNotBlank() && !isPlaceholder(it) }
                 ?: inferName(text, lang))
             Part(path, text, lang, inferred = given == null || isPlaceholder(given))
         }
-        if (cleaned.isEmpty()) return Split(emptyList(), headers)
+        if (cleaned.isEmpty()) return Split(emptyList(), headers, tree, dropped)
         // unique names, so two `main.kt` blocks cannot overwrite each other
         val used = HashMap<String, Int>()
         val unique = cleaned.map { p ->
@@ -296,7 +392,7 @@ object Parts {
             used[p.path] = n
             if (n == 1) p else p.copy(path = addSuffix(p.path, n))
         }
-        return Split(unique, headers)
+        return Split(unique, headers, tree, dropped)
     }
 
     /** `paste_here.kt` and friends are placeholders, not file names. */

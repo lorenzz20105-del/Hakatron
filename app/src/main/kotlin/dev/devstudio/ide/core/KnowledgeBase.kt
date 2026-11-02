@@ -86,6 +86,114 @@ object KnowledgeBase {
         return key?.let { JAVA_COORD[it] }
     }
 
+    // ------------------------------------------------------- failure signature
+    /**
+     * The key Devos remembers a failure by.
+     *
+     * The old key was the last non-blank line of the output, cut to 90 chars.
+     * That line is usually a summary ("2 errors generated") or carries a temp
+     * path, a PID or a hex address, so the *same* failure on the *same* phone
+     * produced a different key every run and the fix memory almost never hit.
+     * A signature has to be stable across runs and still point at the real
+     * diagnostic, so this picks the most diagnostic-looking line and strips the
+     * parts that change between runs.
+     */
+    fun signature(output: String): String {
+        val lines = output.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("[exit") }
+        if (lines.isEmpty()) return ""
+        val best = lines
+            .map { it to score(it) }
+            .filter { it.second > 0 }
+            .maxByOrNull { it.second }?.first
+            ?: lines.last()
+        return normalise(best)
+    }
+
+    /** Higher = more likely to be the line a human would name the failure by. */
+    private fun score(line: String): Int {
+        val l = line.lowercase()
+        var n = 0
+        if (Regex("\\b(fatal|failed to|failure)\b").containsMatchIn(l)) n += 3
+        if (Regex("\\berror(?!s generated)\\b").containsMatchIn(l)) n += 3
+        if (Regex("\\b(exception|traceback|stack trace)\\b").containsMatchIn(l)) n += 2
+        if (Regex("\\b(cannot find|no such file|not found|undefined reference|unresolved|unrecognised|unrecognized)\\b")
+                .containsMatchIn(l)) n += 2
+        if (l.startsWith("npm err!") || l.startsWith("e: ") || l.contains(": error:")) n += 3
+        // ModuleNotFoundError, PermissionError, JSImportError — the name carries the kind
+        if (Regex("^[\\w.]*(error|exception)\\b").containsMatchIn(l)) n += 3
+        if (Regex("\\braises?\\b").containsMatchIn(l)) n += 1
+        if (l.startsWith("warning:") || l.contains(": warning:")) n -= 2
+        if (Regex("^\\d+ (error|warning)s? (generated|emitted)").containsMatchIn(l)) n -= 3
+        if (l == "^" || Regex("^[\\s^~-]+$").containsMatchIn(l)) n -= 4
+        if (l.startsWith(">") || l.startsWith("$")) n -= 1
+        return n
+    }
+
+    /** Removes everything that differs between two runs of the same failure. */
+    fun normalise(line: String): String {
+        var s = line.lowercase()
+        s = Regex("\\b0x[0-9a-f]+\\b").replace(s, "#")            // pointers
+        s = Regex("(?<![a-z])\\d{3,}(?![a-z])").replace(s, "#")      // pids, timestamps, byte counts
+        s = Regex(":\\d+(:\\d+)*(?=:|\\s|$)").replace(s, "")   // file:12:3
+        s = Regex("\\b(in|at) line \\d+").replace(s, "$1 line #")
+        s = Regex("\\S*/\\S*").replace(s) { m ->                  // keep the basename only
+            m.value.trimEnd('/').substringAfterLast('/').ifEmpty { m.value }
+        }
+        s = Regex("\\s+").replace(s, " ").trim()
+        return if (s.length > 120) s.take(120) else s
+    }
+
+    /**
+     * Why the error happened, in one sentence.
+     *
+     * A user reading "sh: npm: not found" learns nothing about the project; the
+     * sentence below says the tool is missing from the guest, which is a thing
+     * they can act on. Deliberately pattern-first and short: this is shown next to
+     * the log line, so it must reward a glance. Unknown shapes return null rather
+     * than a guess dressed as a diagnosis.
+     */
+    fun explain(error: String): String? {
+        fun has(rx: String) = Regex(rx, RegexOption.IGNORE_CASE).containsMatchIn(error)
+        return when {
+            has("No module named") ->
+                "Python cannot import that module: it is not installed in the guest, or the " +
+                    "file that defines it was not pasted."
+            has("externally-managed-environment") ->
+                "Alpine's Python refuses global installs by design (PEP 668); pip needs to be " +
+                    "told this guest is disposable."
+            has(": (command )?not found|not found: ") ->
+                "The command does not exist in the guest yet — it is a package, and the fix is " +
+                    "to install that package, not to change the code."
+            has("undefined reference|cannot find -l") ->
+                "The linker found the header but not the compiled library — the code compiled, " +
+                    "the link step did not."
+            has("No such file or directory: '|cannot access '") ->
+                "A file the build expects is missing; either it was never written or the path " +
+                    "in the project is wrong."
+            has("Permission denied|EACCES") ->
+                "Something in the project is not executable or not writable by the guest user."
+            has("Killed|out of memory|Cannot allocate memory") ->
+                "The guest ran out of memory — the build is too big for the phone, not broken."
+            has("No space left on device") ->
+                "The guest filesystem is full, so delete a stale project or a build directory " +
+                    "before trying again."
+            has("Could not resolve host|Network is unreachable|Temporary failure in name resolution") ->
+                "There is no working network from inside the guest, so nothing can be downloaded."
+            has("Could NOT find|Could not find a version that satisfies") ->
+                "A dependency the build asked for is not available in the repositories the guest " +
+                    "can see."
+            has("expected|invalid syntax|unexpected token|SyntaxError") ->
+                "The source itself does not parse, so nothing after this line can be trusted — " +
+                    "the fix belongs in the file, not in the build."
+            has("SIGSYS|Bad system call|exit (status )?159") ->
+                "PRoot blocked a syscall the program makes; the launcher has to allow it, the " +
+                    "command cannot fix that from inside."
+            else -> null
+        }
+    }
+
     /** ordered: first regex that matches decides the fix. */
     fun planFix(error: String, port: Int?, entry: String): Fix? {
         fun m(rx: String) = Regex(rx, setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)).find(error)

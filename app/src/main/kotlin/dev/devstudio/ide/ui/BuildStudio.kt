@@ -13,11 +13,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -110,6 +105,8 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
     // Every paste is split into the files it contains — 0.16.1 put the whole project
     // in one `=== paste_here.kt ===` block, which is why the plan was nonsense.
     val split = remember(parts, structure) { Parts.split(parts) }
+    var showRaw by remember { mutableStateOf(false) }
+    var selectedPart by remember { mutableStateOf(0) }
     val fixedParts = remember(parts, split) { if (split.count > 0) split.toText() else parts }
 
     fun analyze() {
@@ -164,7 +161,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     Spacer(Modifier.height(10.dp))
                 }
 
-                SectionLabel("FROM A SCREENSHOT")
+                HkSectionLabel(null, "From a screenshot", "reads the tree or the code with OCR")
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Pressable(
                         onClick = { picker.launch("image/*") },
@@ -196,7 +193,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     modifier = Modifier.padding(top = 6.dp)
                 )
 
-                SectionLabel("0 · START FROM A TEMPLATE")
+                HkSectionLabel(0, "Start from a template", "one tap fills all three steps")
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     Templates.all.forEach { tpl ->
@@ -217,7 +214,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     }
                 }
 
-                SectionLabel("1 · PROJECT STRUCTURE")
+                HkSectionLabel(1, "Structure", "what you want to build")
                 PasteField(structure, { structure = it }, 5,
                     "myapp/\n├── app.py\n├── requirements.txt\n└── templates/index.html")
 
@@ -254,53 +251,30 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     }
                 }
 
-                SectionLabel("2 · THE PARTS")
-                PasteField(fixedParts, { parts = it }, 7,
-                    "Paste one file, several files, or a whole project — it is split for you.")
+                HkSectionLabel(
+                    2, "Parts", "paste code — it is split into files for you",
+                    count = if (split.count > 0) split.count else null,
+                    tone = if (split.count > 1) Pal.mint else Pal.faint
+                )
+                PartsPanel(
+                    split = split,
+                    raw = fixedParts,
+                    onRaw = { parts = it },
+                    showRaw = showRaw,
+                    onShowRaw = { showRaw = it },
+                    selected = selectedPart.coerceIn(0, (split.count - 1).coerceAtLeast(0)),
+                    onSelect = { selectedPart = it },
+                    onRemove = { i ->
+                        parts = split.without(i)
+                        selectedPart = (selectedPart - 1).coerceAtLeast(0)
+                    },
+                    canWriteHeaders = split.toText() != parts,
+                    onWriteHeaders = { parts = split.toText() },
+                    lines = 7,
+                    hint = "Paste one file, several files, or a whole project."
+                )
 
-                // What the splitter found, shown before anything is planned.
-                Row(Modifier.fillMaxWidth().padding(top = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    StatusPill(
-                        when (split.count) {
-                            0 -> "no code yet"
-                            1 -> "1 file"
-                            else -> "${split.count} files"
-                        },
-                        if (split.count > 1) Pal.mint else Pal.faint,
-                        filled = split.count > 1
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Text(
-                        if (split.count == 0) "paste code below and the files appear here"
-                        else split.files.joinToString(" · "),
-                        color = Pal.dim, fontSize = 9.5.sp, maxLines = 2,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                if (split.count > 1 || (split.count == 1 && split.parts[0].inferred)) {
-                    Spacer(Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        if (split.toText() != parts) {
-                            Pressable(onClick = { parts = split.toText() }, scaleDown = 0.95f) {
-                                Box(Modifier.clip(RoundedCornerShape(50)).background(Pal.violetSoft)
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                    Text("Write the ${split.count} file header(s)",
-                                        color = Pal.violet, fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                        Text(
-                            if (split.headerCount == 0) "names inferred from the code"
-                            else "${split.headerCount} header(s) found",
-                            color = Pal.faint, fontSize = 9.sp,
-                            modifier = Modifier.align(Alignment.CenterVertically)
-                        )
-                    }
-                }
-
-                SectionLabel("3 · BUILD NOTES (optional but powerful)")
+                HkSectionLabel(3, "Build notes", "optional — tools, steps, commands")
                 PasteField(notes, { notes = it }, 5,
                     "Tools needed first: gcc, make\nBefore building: mkdir -p build\nBuild: make\nRun: ./app")
 
@@ -363,7 +337,8 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                                     scope.launch {
                                         val res = withContext(Dispatchers.IO) {
                                             planner.build(p, store.memory(),
-                                                onLearn = { k, v -> store.rememberFix(k, v) })
+                                                onLearn = { k, v -> store.rememberFix(k, v) },
+                                                onForget = { k -> store.forgetFix(k) })
                                         }
                                         result = res
                                         log = res.log
@@ -385,8 +360,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
             else -> Column(Modifier.fillMaxSize().padding(horizontal = 14.dp)) {
                 if (running) {
                     Spacer(Modifier.height(4.dp))
-                    LinearProgressIndicator(Modifier.fillMaxWidth(), color = Pal.mint,
-                        trackColor = Pal.surface3)
+                    HkProgress(null, Pal.mint)
                     Text("running · $stepNow", color = Pal.mint, fontSize = 10.sp,
                         modifier = Modifier.padding(top = 6.dp))
                 }
@@ -409,6 +383,17 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                                     }
                                     Text(l.text, color = c, fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace, lineHeight = 15.sp)
+                                    // one plain sentence about why, under the raw line
+                                    l.why?.let { why ->
+                                        Row(Modifier.padding(start = 8.dp, bottom = 4.dp)) {
+                                            Box(Modifier.padding(top = 5.dp).size(3.dp)
+                                                .clip(RoundedCornerShape(50))
+                                                .background(c.copy(alpha = 0.6f)))
+                                            Spacer(Modifier.width(7.dp))
+                                            Text(why, color = Pal.dim, fontSize = 9.5.sp,
+                                                lineHeight = 14.sp)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -560,12 +545,207 @@ private fun PlanCard(p: Planner.Plan) {
     }
 }
 
+/**
+ * A step header: numbered badge, name in full brightness, and a quiet hint.
+ * Replaces the uppercase grey caption — it read like an old dialog label and
+ * gave the eye nothing to hold on to while scrolling a long form.
+ */
 @Composable
-private fun SectionLabel(text: String) {
-    Spacer(Modifier.height(14.dp))
-    Text(text, color = Pal.faint, fontSize = 8.5.sp, letterSpacing = 1.1.sp,
-        fontWeight = FontWeight.Bold)
-    Spacer(Modifier.height(6.dp))
+private fun HkSectionLabel(
+    index: Int?,
+    title: String,
+    hint: String? = null,
+    count: Int? = null,
+    tone: Color = Pal.violet
+) {
+    Spacer(Modifier.height(15.dp))
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(19.dp).clip(RoundedCornerShape(6.dp))
+                .background(if (index == null) Pal.surface3 else tone.copy(alpha = 0.16f))
+                .border(1.dp, tone.copy(alpha = 0.35f), RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (index == null)
+                Box(Modifier.size(5.dp).clip(RoundedCornerShape(50)).background(tone))
+            else
+                Text("$index", color = tone, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace)
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(title, color = Pal.text, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+        if (count != null) {
+            Spacer(Modifier.width(7.dp))
+            StatusPill("$count", tone, filled = true)
+        }
+        if (hint != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(hint, color = Pal.faint, fontSize = 9.5.sp, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+        }
+    }
+    Spacer(Modifier.height(7.dp))
+}
+
+/** A tiny two-state switch used to flip the parts panel between files and text. */
+@Composable
+private fun SegText(text: String, on: Boolean, onClick: () -> Unit) {
+    Pressable(onClick = onClick, scaleDown = 0.94f) {
+        Box(
+            Modifier.clip(RoundedCornerShape(50))
+                .background(if (on) Pal.surface3 else Color.Transparent)
+                .border(1.dp, if (on) Pal.line else Color.Transparent, RoundedCornerShape(50))
+                .padding(horizontal = 11.dp, vertical = 5.dp)
+        ) {
+            Text(text, color = if (on) Pal.text else Pal.faint, fontSize = 10.sp,
+                fontWeight = if (on) FontWeight.Bold else FontWeight.Medium)
+        }
+    }
+}
+
+/**
+ * The parts panel — the answer to "it's only one part".
+ *
+ * Once the splitter has found several files this stops being a text box: the
+ * files sit in a scrolling tab strip (so eight names never wrap into a grey
+ * paragraph), the selected file's body is shown under its own header, and
+ * anything the splitter had to guess is labelled rather than hidden.
+ */
+@Composable
+private fun PartsPanel(
+    split: Parts.Split,
+    raw: String,
+    onRaw: (String) -> Unit,
+    showRaw: Boolean,
+    onShowRaw: (Boolean) -> Unit,
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    onRemove: (Int) -> Unit,
+    canWriteHeaders: Boolean,
+    onWriteHeaders: () -> Unit,
+    lines: Int,
+    hint: String
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (split.count > 0) {
+                SegText("Files", !showRaw) { onShowRaw(false) }
+                Spacer(Modifier.width(6.dp))
+            }
+            SegText("Text", showRaw || split.count == 0) { onShowRaw(true) }
+            Spacer(Modifier.weight(1f))
+            if (split.dropped > 0)
+                Text("${split.dropped} chat lines skipped", color = Pal.faint, fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace)
+        }
+        Spacer(Modifier.height(8.dp))
+
+        if (showRaw || split.count == 0) {
+            PasteField(raw, onRaw, lines, hint)
+            if (split.count > 0) {
+                Spacer(Modifier.height(6.dp))
+                Text("Editing the text — tap Files to review the split again.",
+                    color = Pal.faint, fontSize = 9.sp)
+            }
+        } else {
+            // file strip — scrolls sideways, never wraps
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                split.parts.forEachIndexed { i, part ->
+                    val on = i == selected
+                    Pressable(onClick = { onSelect(i) }, scaleDown = 0.95f) {
+                        Row(
+                            Modifier.clip(RoundedCornerShape(8.dp))
+                                .background(if (on) Pal.violetSoft else Pal.surface2)
+                                .border(1.dp, if (on) Pal.violet.copy(alpha = 0.55f) else Pal.line,
+                                    RoundedCornerShape(8.dp))
+                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(Modifier.size(5.dp).clip(RoundedCornerShape(50))
+                                .background(if (part.inferred) Pal.amber else Pal.mint))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                part.path.substringAfterLast('/'),
+                                color = if (on) Pal.text else Pal.dim, fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal
+                            )
+                            if (part.path.contains('/')) {
+                                Spacer(Modifier.width(5.dp))
+                                Text(part.path.substringBeforeLast('/'),
+                                    color = Pal.faint, fontSize = 8.5.sp,
+                                    fontFamily = FontFamily.Monospace)
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+
+            val part = split.parts.getOrNull(selected) ?: split.parts.first()
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(Tok.rM))
+                    .background(Pal.ink)
+                    .border(1.dp, Pal.line, RoundedCornerShape(Tok.rM))
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().background(Pal.surface2)
+                        .padding(start = 11.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(part.path, color = Pal.text, fontSize = 10.5.sp,
+                        fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(6.dp))
+                    Text(part.lang, color = Pal.faint, fontSize = 8.5.sp,
+                        fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.weight(1f))
+                    Text("${part.body.lines().count { it.isNotBlank() }} lines",
+                        color = Pal.faint, fontSize = 8.5.sp, fontFamily = FontFamily.Monospace)
+                    if (part.inferred) {
+                        Spacer(Modifier.width(6.dp))
+                        StatusPill("inferred", Pal.amber)
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    Pressable(onClick = { onRemove(selected) }, scaleDown = 0.9f) {
+                        Box(
+                            Modifier.size(22.dp).clip(RoundedCornerShape(6.dp)).background(Pal.surface3),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("✕", color = Pal.faint, fontSize = 9.sp)
+                        }
+                    }
+                }
+                Text(
+                    part.body.trim().ifEmpty { "—" },
+                    color = Color(0xFFA9B4C9), fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    lineHeight = 15.sp, maxLines = 13,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 9.dp)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (canWriteHeaders)
+                    Pressable(onClick = onWriteHeaders, scaleDown = 0.95f) {
+                        Box(Modifier.clip(RoundedCornerShape(50)).background(Pal.violetSoft)
+                            .border(1.dp, Pal.violet.copy(alpha = 0.4f), RoundedCornerShape(50))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)) {
+                            Text("Write ${split.count} file header(s)", color = Pal.violet,
+                                fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                GhostButton("Edit text") { onShowRaw(true) }
+                Spacer(Modifier.weight(1f))
+                Text("${split.totalLines} lines total", color = Pal.faint, fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
 }
 
 @Composable

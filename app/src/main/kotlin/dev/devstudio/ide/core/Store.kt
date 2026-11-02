@@ -36,6 +36,15 @@ class Store(ctx: Context) {
         prefs.edit().putString("fix_memory", o.toString()).apply()
     }
 
+    fun forgetFix(signature: String) {
+        val m = memory()
+        if (!m.containsKey(signature)) return
+        m.remove(signature)
+        val o = JSONObject()
+        m.forEach { (k, v) -> o.put(k, v) }
+        prefs.edit().putString("fix_memory", o.toString()).apply()
+    }
+
     fun forgetFixes() {
         prefs.edit().remove("fix_memory").apply()
     }

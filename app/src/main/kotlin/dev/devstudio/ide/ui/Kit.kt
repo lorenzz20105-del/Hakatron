@@ -295,6 +295,121 @@ fun Skeleton(height: Dp, radius: Dp = Tok.rS) {
     )
 }
 
+/**
+ * The app's only progress bar.
+ *
+ * Material's `LinearProgressIndicator` brought its own height, its own colour API
+ * and its own animation curve — three things that did not match the kit, and it
+ * was the last place a stock Material widget was still visible. [progress] null
+ * means "no idea how long", which sweeps instead of lying with a fake fraction.
+ */
+@Composable
+fun HkProgress(progress: Float?, tone: Color, modifier: Modifier = Modifier, height: Dp = 4.dp) {
+    val hand = Motion.spatial<Float>()
+    val p by animateFloatAsState((progress ?: 0f).coerceIn(0f, 1f), hand, label = "progress")
+    if (progress != null) {
+        Box(modifier.fillMaxWidth().height(height)
+            .clip(RoundedCornerShape(50)).background(Pal.surface3)) {
+            Box(Modifier.fillMaxWidth(p).height(height)
+                .background(Brush.horizontalGradient(listOf(tone.copy(alpha = 0.55f), tone)),
+                    RoundedCornerShape(50)))
+        }
+    } else {
+        val t = rememberInfiniteTransition(label = "bar")
+        val x by t.animateFloat(
+            initialValue = -0.4f, targetValue = 1.4f,
+            animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Restart), label = "sweep"
+        )
+        Box(modifier.fillMaxWidth().height(height)
+            .clip(RoundedCornerShape(50)).background(Pal.surface3)) {
+            Box(Modifier.fillMaxWidth(0.38f).height(height)
+                .offset(x = (x * 260).dp)
+                .background(Brush.horizontalGradient(listOf(Color.Transparent, tone, Color.Transparent)),
+                    RoundedCornerShape(50)))
+        }
+    }
+}
+
+/**
+ * A section header: optional numbered badge, the name at full brightness, an
+ * optional count pill and a quiet hint. This was written for Build Studio and is
+ * now the kit's — every screen had invented its own version, which is how an app
+ * ends up with five spellings of the same heading.
+ */
+@Composable
+fun HkSection(
+    index: Int?,
+    title: String,
+    hint: String? = null,
+    count: Int? = null,
+    tone: Color = Pal.violet,
+    topSpace: Dp = Tok.l
+) {
+    Spacer(Modifier.height(topSpace))
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        if (index != null) {
+            Box(
+                Modifier.size(19.dp).clip(RoundedCornerShape(6.dp))
+                    .background(tone.copy(alpha = 0.16f))
+                    .border(1.dp, tone.copy(alpha = 0.35f), RoundedCornerShape(6.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("$index", color = tone, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace)
+            }
+            Spacer(Modifier.width(8.dp))
+        } else {
+            Box(Modifier.size(5.dp).clip(RoundedCornerShape(50)).background(tone))
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(title, color = Pal.text, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+        if (count != null) {
+            Spacer(Modifier.width(7.dp))
+            StatusPill("$count", tone, filled = true)
+        }
+        if (hint != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(hint, color = Pal.faint, fontSize = 9.5.sp, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+        }
+    }
+    Spacer(Modifier.height(7.dp))
+}
+
+/** One empty state for the whole app: a glyph, a sentence, and one way out. */
+@Composable
+fun HkEmpty(
+    glyph: String,
+    title: String,
+    body: String,
+    tone: Color = Pal.violet,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier.fillMaxWidth().padding(vertical = 26.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(RoundedCornerShape(14.dp)).background(tone.copy(alpha = 0.12f))
+                .border(1.dp, tone.copy(alpha = 0.28f), RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) { Text(glyph, color = tone, fontSize = 18.sp, fontWeight = FontWeight.Black) }
+        Spacer(Modifier.height(10.dp))
+        Text(title, color = Pal.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(3.dp))
+        Text(body, color = Pal.faint, fontSize = 10.sp, lineHeight = 15.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 16.dp))
+        if (actionLabel != null && onAction != null) {
+            Spacer(Modifier.height(10.dp))
+            GhostButton(actionLabel) { onAction() }
+        }
+    }
+}
+
 /** A live progress ring — used for engine readiness and build progress. */
 @Composable
 fun Ring(progress: Float, tone: Color, size: Dp = 46.dp, stroke: Dp = 4.dp,

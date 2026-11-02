@@ -17,7 +17,7 @@ class Planner(
     data class Step(val kind: String, val cmd: String, val why: String, val source: String = "inferred")
     data class Issue(val file: String, val sev: String, val line: Int, val msg: String)
     data class Prediction(val sev: String, val where: String, val what: String, val fix: String)
-    data class LogLine(val level: String, val text: String)
+    data class LogLine(val level: String, val text: String, val why: String? = null)
 
     data class Plan(
         val name: String,
@@ -272,7 +272,8 @@ class Planner(
     }
 
     fun build(plan: Plan, memory: MutableMap<String, String> = HashMap(),
-              onLearn: (String, String) -> Unit = { _, _ -> }, maxAttempts: Int = 4): Result {
+              onLearn: (String, String) -> Unit = { _, _ -> },
+              onForget: (String) -> Unit = { _ -> }, maxAttempts: Int = 4): Result {
         val log = ArrayList<LogLine>()
         plan.blocked?.let { why ->
             log.add(LogLine("stop", why))
@@ -305,9 +306,11 @@ class Planner(
                     break
                 }
                 val errLine = out.lines().lastOrNull { it.isNotBlank() && !it.startsWith("[exit") } ?: out
-                log.add(LogLine("err", errLine))
-                // learned first: the same error on this device is answered instantly
-                val errKey = errLine.trim().take(90)
+                log.add(LogLine("err", errLine, KnowledgeBase.explain(out)))
+                // learned first: the same error on this device is answered instantly.
+                // The key is a stable signature, not the raw last line — otherwise the
+                // same failure never matches twice and the memory is dead weight.
+                val errKey = KnowledgeBase.signature(out)
                 val learnedCmd = memory[errKey]
                 if (learnedCmd != null) {
                     log.add(LogLine("fix", "remembered: ${learnedCmd}"))
@@ -321,7 +324,10 @@ class Planner(
                             }
                         continue
                     }
-                    log.add(LogLine("err", "remembered fix no longer works — re-analysing"))
+                    // stale memory teaches the wrong lesson — drop it
+                    memory.remove(errKey)
+                    onForget(errKey)
+                    log.add(LogLine("forget", "remembered fix no longer works — forgotten, re-analysing"))
                 }
                 val fix = KnowledgeBase.planFix(out, port, plan.runCmd.split(" ").last())
                 if (fix == null) {

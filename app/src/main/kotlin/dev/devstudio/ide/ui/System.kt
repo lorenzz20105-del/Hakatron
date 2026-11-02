@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -95,8 +94,7 @@ fun SystemScreen(
                     }
                     if (busy) {
                         Spacer(Modifier.height(10.dp))
-                        LinearProgressIndicator(Modifier.fillMaxWidth(), color = Pal.amber,
-                            trackColor = Pal.surface3)
+                        HkProgress(null, Pal.amber)
                         Text(log.ifBlank { "working…" }, color = Pal.amber, fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp))
                     } else {
@@ -202,8 +200,7 @@ fun SystemScreen(
                     }
                     if (installing) {
                         Spacer(Modifier.height(10.dp))
-                        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth(),
-                            color = Pal.cyan, trackColor = Pal.surface3)
+                        HkProgress(progress, Pal.cyan)
                         Text(phase, color = Pal.cyan, fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp))
                     } else {

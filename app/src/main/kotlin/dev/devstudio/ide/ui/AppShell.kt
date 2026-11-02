@@ -250,7 +250,7 @@ private fun CommandPalette(open: Boolean, onDismiss: () -> Unit, onPick: (Route)
                     tone = Pal.surface2, radius = Tok.rL, border = Pal.line
                 ) {
                     Column(Modifier.padding(14.dp)) {
-                        Label("GO ANYWHERE")
+                        Label("Go anywhere")
                         Spacer(Modifier.height(8.dp))
                         listOf(
                             Route.Build to "Build a project from a tree or a screenshot",
@@ -401,7 +401,7 @@ private fun HomeScreen(
                 TCard(m.fillMaxWidth(), tone = Color(0xFF141126), radius = Tok.rL,
                     border = Pal.violet.copy(alpha = 0.28f), glow = Pal.violet) {
                     Column(Modifier.padding(16.dp)) {
-                        Label("START HERE", Pal.violet)
+                        Label("Start here", Pal.violet)
                         Spacer(Modifier.height(3.dp))
                         Text("Build something", color = Pal.text, fontSize = 20.sp,
                             fontWeight = FontWeight.Black, letterSpacing = (-0.4).sp)
@@ -414,7 +414,36 @@ private fun HomeScreen(
                 }
             }
 
-            SectionRow("WORKSPACE")
+            // Continue: the one thing a returning user wants and had to dig for.
+            if (recents.isNotEmpty()) {
+                HkSection(null, "Continue", "last file you had open", tone = Pal.mint)
+                Staggered(2) { m ->
+                    val last = recents.first()
+                    Pressable(onClick = { go(Route.Editor) }, modifier = m.fillMaxWidth()) {
+                        TCard(tone = Pal.surface, radius = Tok.rM) {
+                            Row(Modifier.fillMaxWidth().padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier.size(30.dp).clip(RoundedCornerShape(9.dp))
+                                        .background(Pal.mintSoft), contentAlignment = Alignment.Center
+                                ) { Text("▶", color = Pal.mint, fontSize = 12.sp) }
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(last.substringAfterLast('/'), color = Pal.text,
+                                        fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                    Text(last.substringBeforeLast('/', "~"),
+                                        color = Pal.faint, fontSize = 9.sp, maxLines = 1,
+                                        fontFamily = FontFamily.Monospace)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                StatusPill("open", Pal.mint)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HkSection(null, "Workspace", "everything runs in the guest", tone = Pal.cyan)
             Staggered(2) { m ->
                 Row(m.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ActionTile("▤", "Files", "$fileCount in guest", Pal.cyan,
@@ -431,7 +460,7 @@ private fun HomeScreen(
                 }
             }
 
-            SectionRow("AT A GLANCE")
+            HkSection(null, "At a glance", tone = Pal.amber)
             Staggered(3) { m ->
                 Row(m.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     StatTile("STORAGE", "$freeGb GB", Pal.dim, Modifier.weight(1f))
@@ -442,7 +471,7 @@ private fun HomeScreen(
             }
 
             if (recents.isNotEmpty()) {
-                SectionRow("RECENT", "open editor") { go(Route.Editor) }
+                HkSection(null, "Recent", "open editor", tone = Pal.violet)
                 Staggered(4) { m ->
                     TCard(m.fillMaxWidth()) {
                         Column(Modifier.padding(vertical = 4.dp)) {
