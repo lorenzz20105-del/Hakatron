@@ -67,6 +67,9 @@ object Pal {
     val amberSoft = Color(0xFF2E2314)
     val rose = Color(0xFFFF6B81)
     val roseSoft = Color(0xFF321B22)
+
+    /** code text — the one colour every monospace block shares */
+    val code = Color(0xFFA9B4C9)
 }
 
 object Tok {
@@ -148,9 +151,22 @@ fun TCard(
     ) { content() }
 }
 
+/**
+ * A section caption. Sentence case, no tracking — the old style was a small
+ * uppercase grey string with wide letter spacing, which is exactly what made the
+ * app read as "old chrome". Callers may still pass an uppercase string; it is
+ * normalised here so one place decides how a caption looks.
+ */
 @Composable
 fun Label(text: String, color: Color = Pal.dim) =
-    Text(text, color = color, fontSize = 9.sp, letterSpacing = 1.2.sp, fontWeight = FontWeight.Bold)
+    Text(pretty(text), color = color, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+
+/** ALL CAPS in, sentence case out. Short tokens ("CPU", "TLS") are left alone. */
+fun pretty(text: String): String {
+    if (text.length < 4 || text != text.uppercase() ||
+        text.any { !it.isLetterOrDigit() && it != ' ' }) return text
+    return text.lowercase().replaceFirstChar { it.uppercaseChar() }
+}
 
 @Composable
 fun SectionRow(text: String, trailing: String? = null, onTrailing: (() -> Unit)? = null) {
@@ -240,8 +256,8 @@ fun GhostButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit
 fun StatTile(label: String, value: String, tone: Color, modifier: Modifier = Modifier) {
     TCard(modifier = modifier, tone = Pal.surface, radius = Tok.rS) {
         Column(Modifier.padding(horizontal = 11.dp, vertical = 9.dp)) {
-            Text(label, color = Pal.faint, fontSize = 7.5.sp, letterSpacing = 1.1.sp,
-                fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(pretty(label), color = Pal.faint, fontSize = 8.5.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1)
             Spacer(Modifier.height(2.dp))
             Text(value, color = tone, fontSize = 15.sp, fontWeight = FontWeight.Black, maxLines = 1)
         }
@@ -431,7 +447,7 @@ fun Ring(progress: Float, tone: Color, size: Dp = 46.dp, stroke: Dp = 4.dp,
 
 /** Monospace block for command output, with a soft inset tone. */
 @Composable
-fun MonoBlock(text: String, tone: Color = Color(0xFFA9B4C9), maxLines: Int = 18) {
+fun MonoBlock(text: String, tone: Color = Pal.code, maxLines: Int = 18) {
     TCard(tone = Color(0xFF0B0D12), radius = Tok.rS, border = Pal.lineSoft) {
         Text(
             text, color = tone, fontSize = 9.8.sp, lineHeight = 13.5.sp,

@@ -105,6 +105,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
     // Every paste is split into the files it contains — 0.16.1 put the whole project
     // in one `=== paste_here.kt ===` block, which is why the plan was nonsense.
     val split = remember(parts, structure) { Parts.split(parts) }
+    var memTick by remember { mutableStateOf(0) }
     var showRaw by remember { mutableStateOf(false) }
     var selectedPart by remember { mutableStateOf(0) }
     val fixedParts = remember(parts, split) { if (split.count > 0) split.toText() else parts }
@@ -113,7 +114,10 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
         // accept the split on the way in, so what the planner sees is what is shown
         val body = if (split.count > 0) split.toText() else parts
         if (body != parts) parts = body
-        plan = planner.plan("project", structure, body, notes)
+        plan = planner.recall(
+            planner.plan("project", structure, body, notes),
+            store.recipes().map { Planner.Recall(it.name, it.stack, it.steps) }
+        )
         log = emptyList()
         result = null
         tab = 1
@@ -161,7 +165,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     Spacer(Modifier.height(10.dp))
                 }
 
-                HkSectionLabel(null, "From a screenshot", "reads the tree or the code with OCR")
+                HkSection(null, "From a screenshot", "reads the tree or the code with OCR")
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Pressable(
                         onClick = { picker.launch("image/*") },
@@ -193,7 +197,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     modifier = Modifier.padding(top = 6.dp)
                 )
 
-                HkSectionLabel(0, "Start from a template", "one tap fills all three steps")
+                HkSection(0, "Start from a template", "one tap fills all three steps")
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     Templates.all.forEach { tpl ->
@@ -214,7 +218,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     }
                 }
 
-                HkSectionLabel(1, "Structure", "what you want to build")
+                HkSection(1, "Structure", "what you want to build")
                 PasteField(structure, { structure = it }, 5,
                     "myapp/\n├── app.py\n├── requirements.txt\n└── templates/index.html")
 
@@ -222,8 +226,8 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     TCard(Modifier.fillMaxWidth().padding(vertical = 8.dp), tone = Pal.amberSoft,
                         radius = Tok.rM, border = Pal.amber.copy(alpha = 0.45f)) {
                         Column(Modifier.padding(13.dp)) {
-                            Text("THAT LOOKS LIKE CODE, NOT A TREE", color = Pal.amber, fontSize = 8.5.sp,
-                                letterSpacing = 1.1.sp, fontWeight = FontWeight.Bold)
+                            Text("That looks like code, not a tree", color = Pal.amber, fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold)
                             Text("Step 1 wants the file tree — folders and file names. What is in there " +
                                 "is source code, so any plan from it would be about the wrong thing.",
                                 color = Pal.dim, fontSize = 10.sp, lineHeight = 15.sp)
@@ -251,7 +255,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     }
                 }
 
-                HkSectionLabel(
+                HkSection(
                     2, "Parts", "paste code — it is split into files for you",
                     count = if (split.count > 0) split.count else null,
                     tone = if (split.count > 1) Pal.mint else Pal.faint
@@ -274,7 +278,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     hint = "Paste one file, several files, or a whole project."
                 )
 
-                HkSectionLabel(3, "Build notes", "optional — tools, steps, commands")
+                HkSection(3, "Build notes", "optional — tools, steps, commands")
                 PasteField(notes, { notes = it }, 5,
                     "Tools needed first: gcc, make\nBefore building: mkdir -p build\nBuild: make\nRun: ./app")
 
@@ -287,6 +291,12 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                     Spacer(Modifier.width(7.dp))
                     Text("real commands · nothing leaves the phone", color = Pal.faint, fontSize = 9.sp)
                 }
+                Spacer(Modifier.height(12.dp))
+                DevosMemoryCard(
+                    fixes = remember(memTick) { store.fixCount() },
+                    recipes = remember(memTick) { store.recipes().size },
+                    onForget = { store.forgetFixes(); memTick++ }
+                )
                 Spacer(Modifier.height(12.dp))
                 GlowButton(
                     text = "Analyze",
@@ -312,8 +322,8 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                         TCard(Modifier.fillMaxWidth(), tone = Pal.amberSoft, radius = Tok.rM,
                             border = Pal.amber.copy(alpha = 0.45f)) {
                             Column(Modifier.padding(13.dp)) {
-                                Text("NOTHING TO BUILD YET", color = Pal.amber, fontSize = 8.5.sp,
-                                    letterSpacing = 1.1.sp, fontWeight = FontWeight.Bold)
+                                Text("Nothing to build yet", color = Pal.amber, fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold)
                                 Text(p.blocked, color = Pal.dim, fontSize = 10.5.sp, lineHeight = 15.sp)
                             }
                         }
@@ -365,7 +375,7 @@ fun BuildStudio(ready: Boolean, onPreview: (String) -> Unit = {}, onClose: () ->
                         modifier = Modifier.padding(top = 6.dp))
                 }
 
-                result?.let { r -> ResultCard(r, onPreview) }
+                result?.let { r -> ResultCard(r, onPreview); StopCard(r) }
 
                 Spacer(Modifier.height(8.dp))
                 if (log.isEmpty() && !running) {
@@ -490,6 +500,119 @@ private fun ResultCard(r: Planner.Result, onPreview: (String) -> Unit) {
     }
 }
 
+/** A small dot + sentence-case caption — never an uppercase tracked label. */
+@Composable
+private fun Caption(text: String, tone: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 1.dp)) {
+        Box(Modifier.size(4.dp).clip(RoundedCornerShape(50)).background(tone))
+        Spacer(Modifier.width(6.dp))
+        Text(text, color = tone, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * The plan, as a rail: numbered dot coloured by kind, the command, and the reason
+ * underneath at a quieter weight. A step this phone has already proved says so.
+ */
+@Composable
+private fun StepTimeline(steps: List<Planner.Step>) {
+    val kinds = mapOf(
+        "install" to Pal.cyan, "build" to Pal.violet, "test" to Pal.amber,
+        "run" to Pal.mint, "before" to Pal.dim
+    )
+    Column(Modifier.fillMaxWidth()) {
+        steps.forEachIndexed { i, step ->
+            val tone = if (step.source == "recalled") Pal.cyan else (kinds[step.kind] ?: Pal.dim)
+            Row(Modifier.fillMaxWidth()) {
+                Column(Modifier.width(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.size(16.dp).clip(RoundedCornerShape(50))
+                        .background(tone.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+                        Text("${i + 1}", color = tone, fontSize = 8.5.sp,
+                            fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    }
+                    if (i != steps.lastIndex)
+                        Box(Modifier.width(1.dp).height(24.dp).background(Pal.lineSoft))
+                }
+                Spacer(Modifier.width(9.dp))
+                Column(Modifier.fillMaxWidth()
+                    .padding(bottom = if (i == steps.lastIndex) 0.dp else 6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(step.kind, color = tone, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace)
+                        if (step.source == "recalled") {
+                            Spacer(Modifier.width(6.dp))
+                            StatusPill("proven here", Pal.cyan)
+                        }
+                    }
+                    Text(step.cmd, color = Pal.text, fontSize = 10.5.sp,
+                        fontFamily = FontFamily.Monospace, lineHeight = 14.sp)
+                    Text(step.why, color = Pal.faint, fontSize = 9.sp, lineHeight = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A stopped build used to be a log and nothing else. This says what happened in
+ * one sentence and what the user can do about it — and never promises a fix
+ * Devos has not proved.
+ */
+@Composable
+private fun StopCard(r: Planner.Result) {
+    if (r.ok || r.stopped == null) return
+    TCard(Modifier.fillMaxWidth().padding(top = 8.dp), tone = Pal.roseSoft, radius = Tok.rM,
+        border = Pal.rose.copy(alpha = 0.45f)) {
+        Column(Modifier.padding(13.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(Pal.rose))
+                Spacer(Modifier.width(7.dp))
+                Text("Stopped — nothing else was touched", color = Pal.rose,
+                    fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(r.stopped!!, color = Pal.dim, fontSize = 10.sp, lineHeight = 14.sp,
+                fontFamily = FontFamily.Monospace)
+            r.advice?.let {
+                Spacer(Modifier.height(7.dp))
+                Text(it, color = Pal.text, fontSize = 10.5.sp, lineHeight = 16.sp)
+            }
+            Spacer(Modifier.height(7.dp))
+            Text("${r.fixes} fix(es) tried · ${r.log.count { l -> l.level == "err" }} error line(s)",
+                color = Pal.faint, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+        }
+    }
+}
+
+/**
+ * What Devos has learned on this device, and a way to throw it away. The fix
+ * memory was write-only from the user's side: it filled up and no screen
+ * admitted that it existed.
+ */
+@Composable
+private fun DevosMemoryCard(fixes: Int, recipes: Int, onForget: () -> Unit) {
+    TCard(Modifier.fillMaxWidth(), tone = Pal.surface, radius = Tok.rM) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(Pal.cyanSoft),
+                contentAlignment = Alignment.Center) {
+                Text("D", color = Pal.cyan, fontSize = 12.sp, fontWeight = FontWeight.Black)
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Devos memory", color = Pal.text, fontSize = 11.5.sp,
+                    fontWeight = FontWeight.SemiBold)
+                Text("$fixes fix(es) remembered · $recipes recipe(s) · all on this phone",
+                    color = Pal.faint, fontSize = 9.5.sp, maxLines = 2)
+            }
+            if (fixes > 0) {
+                Spacer(Modifier.width(8.dp))
+                GhostButton("Forget") { onForget() }
+            }
+        }
+    }
+}
+
 @Composable
 private fun PlanCard(p: Planner.Plan) {
     // the bar fills on an expressive spring instead of appearing already full
@@ -497,9 +620,14 @@ private fun PlanCard(p: Planner.Plan) {
         targetValue = p.confidence.toFloat(), animationSpec = Motion.expressive(), label = "confidence")
     TCard(Modifier.fillMaxWidth(), tone = Pal.surface, radius = Tok.rM) {
         Column(Modifier.padding(14.dp)) {
-            Text("BEST MATCH", color = Pal.violet, fontSize = 8.5.sp, letterSpacing = 1.1.sp,
-                fontWeight = FontWeight.Bold)
-            Text(p.label, color = Pal.text, fontSize = 17.sp, fontWeight = FontWeight.Black)
+            Caption("Best match", Pal.violet)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(p.label, color = Pal.text, fontSize = 17.sp, fontWeight = FontWeight.Black)
+                if (p.recalledFrom != null) {
+                    Spacer(Modifier.width(8.dp))
+                    StatusPill("recalled", Pal.cyan, filled = true)
+                }
+            }
             Text("${(fill * 100).toInt()}% confident · ${p.files.size} file(s)" +
                 (if (p.runCmd.isBlank()) " · no run step" else " · runs: ${p.runCmd}"),
                 color = Pal.dim, fontSize = 10.5.sp)
@@ -518,7 +646,7 @@ private fun PlanCard(p: Planner.Plan) {
             }
             if (p.predictions.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
-                Text("PREDICTED", color = Pal.faint, fontSize = 8.5.sp, letterSpacing = 1.1.sp)
+                Caption("Predicted", Pal.faint)
                 p.predictions.take(4).forEach { pr ->
                     Text("${pr.where}: ${pr.what}", color = levelColour(pr.sev), fontSize = 10.sp)
                 }
@@ -533,59 +661,12 @@ private fun PlanCard(p: Planner.Plan) {
             }
             if (p.steps.isNotEmpty()) {
                 Spacer(Modifier.height(10.dp))
-                Text("STEPS · ${p.steps.size}", color = Pal.faint, fontSize = 8.5.sp,
-                    letterSpacing = 1.1.sp)
-                p.steps.forEachIndexed { i, s ->
-                    Text("${i + 1}. [${s.kind}] ${s.cmd}", color = Pal.text, fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace)
-                    Text("     ${s.why}", color = Pal.faint, fontSize = 9.sp)
-                }
+                Caption("Steps · ${p.steps.size}", Pal.faint)
+                Spacer(Modifier.height(2.dp))
+                StepTimeline(p.steps)
             }
         }
     }
-}
-
-/**
- * A step header: numbered badge, name in full brightness, and a quiet hint.
- * Replaces the uppercase grey caption — it read like an old dialog label and
- * gave the eye nothing to hold on to while scrolling a long form.
- */
-@Composable
-private fun HkSectionLabel(
-    index: Int?,
-    title: String,
-    hint: String? = null,
-    count: Int? = null,
-    tone: Color = Pal.violet
-) {
-    Spacer(Modifier.height(15.dp))
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier.size(19.dp).clip(RoundedCornerShape(6.dp))
-                .background(if (index == null) Pal.surface3 else tone.copy(alpha = 0.16f))
-                .border(1.dp, tone.copy(alpha = 0.35f), RoundedCornerShape(6.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            if (index == null)
-                Box(Modifier.size(5.dp).clip(RoundedCornerShape(50)).background(tone))
-            else
-                Text("$index", color = tone, fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace)
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(title, color = Pal.text, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
-        if (count != null) {
-            Spacer(Modifier.width(7.dp))
-            StatusPill("$count", tone, filled = true)
-        }
-        if (hint != null) {
-            Spacer(Modifier.width(8.dp))
-            Text(hint, color = Pal.faint, fontSize = 9.5.sp, maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f))
-        }
-    }
-    Spacer(Modifier.height(7.dp))
 }
 
 /** A tiny two-state switch used to flip the parts panel between files and text. */

@@ -122,6 +122,33 @@ object Parts {
     private val HEADER_EQ = Regex("^\\s*={3,}\\s*(.+?)\\s*={3,}\\s*$")
     private val HEADER_DASH = Regex("^\\s*-{3,}\\s*([\\w./@+-]+\\.[A-Za-z0-9]{1,10})\\s*-{3,}\\s*$")
     private val HEADER_COMMENT = Regex("^\\s*(?://|#|/\\*|<!--|--|;)\\s*([\\w./@+-]+\\.[A-Za-z0-9]{1,10})\\s*(?:\\*/|-->)?\\s*$")
+    /** A path, or one of the files that famously has no extension. */
+    private val PATHISH =
+        "(?:[\\w./@+-]+\\.[A-Za-z0-9]{1,10}|(?i:dockerfile|makefile|gemfile|procfile|" +
+            "rakefile|vagrantfile|justfile|\\.?gitignore|\\.dockerignore|\\.env))"
+
+    /**
+     * Every header shape in one pattern, so a paste is cut the same way whichever
+     * one the chat window used: `=== app.py ===`, `--- app.py ---`,
+     * `**src/main.rs**`, `### app.py`, `### File: app.py`, `File: app.py`.
+     * A bare `# app.py` is left to HEADER_COMMENT, which needs code after it, so an
+     * `#include` or a markdown heading cannot silently swallow a file.
+     */
+    private val HEADER_ANY = Regex(
+        "^\\s*(?:" +
+            "={3,}\\s*(.+?)\\s*={3,}" + "|" +
+            "-{3,}\\s*($PATHISH)\\s*-{3,}" + "|" +
+            "\\*\\*\\s*($PATHISH)\\s*\\*\\*" + "|" +
+            "#{2,6}\\s*(?:file\\s*:?\\s*)?($PATHISH)" + "|" +
+            "(?:file|path|filename)\\s*:\\s*($PATHISH)" +
+            ")\\s*$",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** The path in a HEADER_ANY match: whichever alternative fired. */
+    private fun headerPath(m: MatchResult): String? =
+        m.groupValues.drop(1).firstOrNull { it.isNotBlank() }?.let { cleanName(it) }
+
     private val FENCE = Regex("^\\s*```\\s*([\\w+#.-]*)\\s*([\\w./@+-]*\\.[A-Za-z0-9]{1,10})?\\s*$")
 
     /** Lines that begin a new file when they appear at the top of a block. */
@@ -165,7 +192,7 @@ object Parts {
         if (ocr) {
             val firstHeader = kept.indexOfFirst { l ->
                 val t = l.trim()
-                HEADER_EQ.matches(t) || HEADER_DASH.matches(t) || FENCE.matches(t)
+                HEADER_ANY.matches(t) || FENCE.matches(t)
             }
             if (firstHeader > 0) {
                 start = firstHeader
@@ -175,7 +202,7 @@ object Parts {
         while (start < kept.size) {
             val t = kept[start].trim()
             if (t.isEmpty()) { start++; continue }
-            if (HEADER_EQ.matches(t) || HEADER_DASH.matches(t) || FENCE.matches(t)) break
+            if (HEADER_ANY.matches(t) || FENCE.matches(t)) break
             if (PATH_LINE.matches(t) || looksLikeCode(t)) break
             dropped++; start++
         }
@@ -183,7 +210,7 @@ object Parts {
         if (text.isBlank()) return Split(emptyList(), 0, tree, dropped)
 
         // 1 — explicit `=== path ===` headers
-        val explicit = sections(text, HEADER_EQ)
+        val explicit = sections(text, HEADER_ANY)
         if (explicit.size > 1)
             return finish(explicit.map { it.first to it.second }, explicit.size, tree, dropped)
         // one header is still a header — unless its body carries another one, in
@@ -208,7 +235,7 @@ object Parts {
     /** True when a body carries its own `path`+`language` (or `===`) header. */
     private fun hasNestedHeader(body: String): Boolean {
         val lines = body.lines()
-        if (lines.any { HEADER_EQ.matches(it.trim()) || HEADER_DASH.matches(it.trim()) }) return true
+        if (lines.any { HEADER_ANY.matches(it.trim()) }) return true
         return lines.indices.any { i ->
             val t = lines[i].trim()
             PATH_LINE.matches(t) && !looksLikeCode(t) &&
@@ -228,7 +255,7 @@ object Parts {
             if (m != null) {
                 if (buf.isNotBlank() || name != null) out.add(name to buf.toString())
                 buf.clear()
-                name = cleanName(m.groupValues[1])
+                name = headerPath(m) ?: cleanName(m.groupValues[1])
                 seenHeader = true
             } else buf.appendLine(line)
         }
@@ -281,10 +308,13 @@ object Parts {
             val line = lines[i]
             val trimmed = line.trim()
 
-            // ---- header: === path === (when a single one survived step 1)
-            val eq = HEADER_EQ.matchEntire(line)
-            if (eq != null) {
-                cut(); name = cleanName(eq.groupValues[1]); i++; continue
+            // ---- header: any of the shapes a chat window produces
+            val any = HEADER_ANY.matchEntire(line)
+            if (any != null) {
+                val path = headerPath(any)
+                if (path != null) {
+                    cut(); name = path; currentLang = languageOf(path); i++; continue
+                }
             }
 
             // ---- header: a bare path line, optionally followed by a bare language line

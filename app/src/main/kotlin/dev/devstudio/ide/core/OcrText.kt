@@ -77,6 +77,52 @@ object OcrText {
     }
 
     /**
+     * Repairs a line of **code** read from a screenshot.
+     *
+     * Somebody screenshots their editor and pastes it in; ML Kit keeps the gutter
+     * digits and loses the spacing the syntax needs:
+     *
+     *  · `12 |     foo();`       → the `12 |` gutter is the editor's, not the code
+     *  · `System . out . println` → `System.out.println`
+     *  · `foo (x)` / `( x`       → `foo(x)` / `(x`
+     *
+     * Only lines that already look like code are touched, so prose is never
+     * re-spaced and a bare path is never welded into an identifier.
+     */
+    fun code(line: String): String {
+        var l = line
+        // an editor gutter: "12 |" / "12 │" / "12:  " (only at the very start)
+        l = Regex("^\\s*\\d{1,4}\\s*[|│] ?").replace(l, "")
+        l = Regex("^\\d{1,4}:\\s{2,}").replace(l, "")
+        if (!looksLikeCode(l)) return l
+        l = Regex("\\s*\\.\\s*(?=\\p{L})").replace(l, ".")        // a . b
+        l = Regex("(\\p{L}|\\d)\\s+\\(").replace(l) { m -> m.groupValues[1] + "(" }   // foo (
+        l = Regex("\\(\\s+(?=[\\p{L}\\d\"])").replace(l, "(")   // ( x
+        l = Regex("\\s+\\)").replace(l, ")")                     // x )
+        return l
+    }
+
+    /**
+     * True when the line has enough syntax to be source code rather than prose.
+     *
+     * Deliberately strict: a sentence with a parenthesis in it ("Complete Package
+     * (One Drop)") must never be re-spaced, so brackets alone prove nothing.
+     */
+    fun looksLikeCode(raw: String): Boolean {
+        val t = raw.trim()
+        if (t.isEmpty()) return false
+        if (Regex("^(fun|def|class|public|private|protected|fn|func|let|var|val|const|import|from|#include|package|using|return|if|for|while|else|switch|case|struct|enum|impl|trait|async|suspend|throw|new|await|yield|@)\\b")
+                .containsMatchIn(t)) return true
+        if (t.any { it in "{};" }) return true
+        if (Regex("(:=|=>|->|==|!=|&&|\\|\\|)").containsMatchIn(t)) return true
+        if (Regex("\\w\\s*\\(\\s*[\"']").containsMatchIn(t)) return true   // call with a literal
+        if (Regex("\\)\\s*\\{").containsMatchIn(t)) return true
+        // a member chain ("System.out") — but "v1.2" is a version, not a call
+        if (t.count { it in "()" } >= 2 && Regex("\\w{2,}\\.\\w{2,}").containsMatchIn(t)) return true
+        return false
+    }
+
+    /**
      * The whole document: [repair] applied to **every** line, then [tidy].
      *
      * `repair` works on one line, and its connector rules are anchored — running it
@@ -85,7 +131,7 @@ object OcrText {
      * numerals. This is the entry point callers should use.
      */
     fun clean(text: String): String =
-        tidy(text.replace("\r\n", "\n").split("\n").map { repair(it) }).joinToString("\n")
+        tidy(text.replace("\r\n", "\n").split("\n").map { code(repair(it)) }).joinToString("\n")
 
     /**
      * Tidies a repaired document:

@@ -36,8 +36,74 @@ class Planner(
         val runCmd: String,
         val ecosystem: String?,
         /** set when the plan must not be executed, with the reason a human can act on */
-        val blocked: String? = null
+        val blocked: String? = null,
+        /** the recipe this plan was warmed from — its steps are the ones that worked here */
+        val recalledFrom: String? = null
     )
+
+    /** A build this device already proved, as recipes are stored. */
+    data class Recall(val name: String, val stack: String, val steps: List<String>)
+
+    // ---------------------------------------------------------------- recall
+    /**
+     * Warm start — the part of Devos that remembers *this phone*.
+     *
+     * Recipes were saved after every build and never read back, so a project the
+     * user had already built once started from scratch again. When the same stack
+     * has been built here before, the commands that actually worked replace the
+     * inferred ones. Nothing else is reused: a stale step list is worse than none.
+     */
+    fun recall(plan: Plan, past: List<Recall>): Plan {
+        if (past.isEmpty()) return plan
+        val hit = past.firstOrNull { it.name == plan.name && it.stack == plan.stack }
+            ?: past.firstOrNull { it.stack == plan.stack }
+            ?: return plan
+        val proven = HashMap<String, String>()
+        hit.steps.forEach { line ->
+            val kind = line.substringBefore('|').trim()
+            val cmd = line.substringAfter('|', "").trim()
+            if (kind.isNotEmpty() && cmd.isNotEmpty()) proven[kind] = cmd
+        }
+        if (proven.isEmpty()) return plan
+        val steps = plan.steps.map { step ->
+            proven[step.kind]?.let { step.copy(cmd = it, source = "recalled") } ?: step
+        }
+        if (steps.none { it.source == "recalled" }) return plan
+        return plan.copy(
+            steps = steps,
+            confidence = (plan.confidence + 0.08).coerceAtMost(1.0),
+            recalledFrom = hit.name
+        )
+    }
+
+    // ------------------------------------------------------------ installs
+    /**
+     * One `apk add` instead of three.
+     *
+     * Separate rules each add their own install step, and in a guest on a phone
+     * every command is a round trip through PRoot. Merging keeps the packages, the
+     * order and the duplicates collapsed. Only apk is merged — pip, npm and bundle
+     * belong to their own ecosystems.
+     */
+    fun coalesceInstalls(steps: List<Step>): List<Step> {
+        val apk = Regex("^apk add (?:--no-cache|-U|--update)?\\s*(.+)$")
+        val pkgs = LinkedHashSet<String>()
+        val out = ArrayList<Step>()
+        var at = -1
+        var source = "inferred"
+        steps.forEach { step ->
+            val m = apk.find(step.cmd.trim())
+            if (m == null) out.add(step) else {
+                if (at < 0) { at = out.size; source = step.source }
+                m.groupValues[1].split(" ").filter { it.isNotBlank() }.forEach { pkgs.add(it) }
+            }
+        }
+        if (at < 0 || pkgs.isEmpty()) return steps
+        out.add(at.coerceAtMost(out.size), Step(
+            "install", "apk add --no-cache " + pkgs.joinToString(" "),
+            "one apk call for every tool the plan needs", source))
+        return out
+    }
 
     // ---------------------------------------------------------------- notes
     /** "Tools needed first: gcc, make" / "Build: make" / "Run: ./app" — tolerant. */
@@ -192,7 +258,7 @@ class Planner(
 
         val predictions = predict(base, contents, steps)
         val issues = review(contents)
-        val keptSteps = steps.filterNot { it.cmd.isBlank() || it.cmd == "true" }
+        val keptSteps = coalesceInstalls(steps.filterNot { it.cmd.isBlank() || it.cmd == "true" })
         val blocked = when {
             nothingToDo ->
                 "Nothing to build: no files and no tree were read. Paste the tree in step 1 " +
@@ -232,6 +298,28 @@ class Planner(
         }
         base.pip.forEach { out.add(Prediction("info", "dependencies", "$it must be installed first",
             "pip install $it")) }
+        // a quoted include of a header nobody pasted — the commonest C/C++ failure
+        // in a pasted project, and one the compiler reports three steps later
+        base.files.filter { Regex("\\.(c|cc|cpp|cxx|h|hpp|hxx)$").containsMatchIn(it) }.forEach { f ->
+            val body = contents[f] ?: return@forEach
+            Regex("^\\s*#\\s*include\\s+\"([^\"]+)\"", RegexOption.MULTILINE).findAll(body).forEach { m ->
+                val inc = m.groupValues[1]
+                val pasted = contents.keys.any { it == inc || it.endsWith("/$inc") }
+                if (!pasted) out.add(Prediction("medium", f,
+                    "includes \"$inc\" and that header was not pasted",
+                    "paste $inc — unless the build generates it (CMake config files do)"))
+            }
+        }
+        if (contents.keys.any { it.endsWith("go.mod") } && contents.keys.none { it.endsWith("go.sum") })
+            out.add(Prediction("info", "go.mod", "no go.sum — the build will download modules",
+                "go mod tidy first, or vendor the dependencies"))
+        val pkgAll = contents.entries.firstOrNull { it.key.endsWith("package.json") }?.value ?: ""
+        if (pkgAll.contains("\"dependencies\"") && contents.keys.none { it.endsWith("package-lock.json") })
+            out.add(Prediction("info", "package.json", "no lockfile — npm install needs the network once",
+                "paste package-lock.json if you have it"))
+        if (base.files.any { it.endsWith("Dockerfile") })
+            out.add(Prediction("info", "Dockerfile", "docker cannot run inside the guest",
+                "the Dockerfile is written as a file; build the project directly instead"))
         if (base.confidence < 0.55) out.add(Prediction("medium", "stack",
             "the stack is a guess (${(base.confidence * 100).toInt()}% confident)", "pick the stack manually"))
         return out
@@ -266,12 +354,50 @@ class Planner(
     // ---------------------------------------------------------------- build
     data class Result(val ok: Boolean, val log: List<LogLine>, val fixes: Int,
                       val stopped: String?, val port: Int?, val gotoLine: Int?,
-                      val phases: Map<String, Boolean> = emptyMap()) {
+                      val phases: Map<String, Boolean> = emptyMap(),
+                      /** plain words about what to do next — never a guess dressed as a fix */
+                      val advice: String? = null) {
         /** done means every phase the plan actually has, passed */
         val done: Boolean get() = ok && phases.isNotEmpty() && phases.values.all { it }
     }
 
+    /**
+     * What the user can do about a stop. Devos may say "I do not know"; it may not
+     * invent a remedy, so this describes the state of the evidence instead.
+     */
+    fun advice(stopped: String?, gotoLine: Int?): String? {
+        if (stopped == null) return null
+        return when {
+            gotoLine != null ->
+                "The compiler stopped at line $gotoLine. That line is the next thing to fix — " +
+                    "Devos will not edit your source."
+            stopped == "unknown error" ->
+                "Devos has no rule for this failure yet. The last error line in the log is the " +
+                    "real message; adding the missing command under Build notes usually gets past it."
+            stopped.contains("same error", true) || stopped.contains("no difference", true) ->
+                "A fix ran and the error came back unchanged, so that fix was wrong for this " +
+                    "project. Devos stopped instead of looping — the log shows which fix it tried."
+            stopped.contains("retries exhausted", true) ->
+                "This step failed repeatedly. Its command probably does not fit this project — " +
+                    "correct it in Build notes and run again."
+            stopped.contains("fix command failed", true) ->
+                "The repair command itself failed, usually because the package is not in the " +
+                    "Alpine repos under that name. The line above it in the log is the real cause."
+            stopped.contains("contents", true) ->
+                "The guest needs the actual files. Paste them in step 2 and analyse again."
+            else -> null
+        }
+    }
+
+    /** [build] with the advice attached — a stop always explains itself. */
     fun build(plan: Plan, memory: MutableMap<String, String> = HashMap(),
+              onLearn: (String, String) -> Unit = { _, _ -> },
+              onForget: (String) -> Unit = { _ -> }, maxAttempts: Int = 4): Result {
+        val r = buildRaw(plan, memory, onLearn, onForget, maxAttempts)
+        return if (r.ok) r else r.copy(advice = advice(r.stopped, r.gotoLine))
+    }
+
+    private fun buildRaw(plan: Plan, memory: MutableMap<String, String> = HashMap(),
               onLearn: (String, String) -> Unit = { _, _ -> },
               onForget: (String) -> Unit = { _ -> }, maxAttempts: Int = 4): Result {
         val log = ArrayList<LogLine>()
@@ -294,6 +420,7 @@ class Planner(
         plan.steps.forEach { step ->
             var cmd = step.cmd
             var attempt = 0
+            val seenErrors = HashSet<String>()
             while (attempt < maxAttempts) {
                 attempt++
                 val full = (env.entries.joinToString(" ") { "${it.key}=${it.value}" } + " " + cmd).trim()
@@ -311,6 +438,12 @@ class Planner(
                 // The key is a stable signature, not the raw last line — otherwise the
                 // same failure never matches twice and the memory is dead weight.
                 val errKey = KnowledgeBase.signature(out)
+                // A stable signature that comes back means the last fix changed nothing.
+                if (errKey.isNotEmpty() && !seenErrors.add(errKey)) {
+                    log.add(LogLine("stop", "the same error came back unchanged — a fix was applied " +
+                        "and did not help, so Devos stopped instead of looping"))
+                    return Result(false, log, fixes, "the same error came back", port, null)
+                }
                 val learnedCmd = memory[errKey]
                 if (learnedCmd != null) {
                     log.add(LogLine("fix", "remembered: ${learnedCmd}"))
@@ -482,9 +615,7 @@ class Planner(
 
     private fun writeProject(name: String, contents: Map<String, String>) {
         if (contents.isEmpty()) return
-        val b64 = android.util.Base64.encodeToString(
-            (contents.entries.joinToString("\u0000") { "${it.key}\u0001${it.value}" }).toByteArray(),
-            android.util.Base64.NO_WRAP)
+        val b64 = B64.encode(contents.entries.joinToString("\u0000") { "${it.key}\u0001${it.value}" })
         run("mkdir -p ~/projects/$name && echo '$b64' | base64 -d | " +
             "awk 'BEGIN{RS=\"\\0\";FS=\"\\001\"}{if(NF>1){cmd=\"mkdir -p \\\"$(dirname \\\"\"$1\"\\\")\\\"\";system(cmd);" +
             "f=$1; $1=\"\"; print substr($0,2) > f; close(f)}}' && echo FILES-WRITTEN")
