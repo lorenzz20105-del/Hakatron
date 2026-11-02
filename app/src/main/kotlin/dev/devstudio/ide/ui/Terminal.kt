@@ -59,43 +59,69 @@ fun TerminalScreen(ready: Boolean) {
 
     var ctrl by remember { mutableStateOf(false) }
     var fontSize by remember { mutableStateOf(11f) }
-    var session by remember { mutableStateOf<ShellSession?>(null) }
     var tick by remember { mutableStateOf(0) }
-    var mode by remember { mutableStateOf("starting") }
-    var title by remember { mutableStateOf("terminal") }
-    var dead by remember { mutableStateOf(false) }
+
+    // Every tab is its own live ShellSession — a real second shell, not a view of
+    // the first. State that belongs to a shell lives on the tab, so switching tabs
+    // never restarts anything and never shows another shell's output.
+    class ShellTab(val s: ShellSession, val n: Int) {
+        var mode by mutableStateOf("starting")
+        var title by mutableStateOf("shell $n")
+        var dead by mutableStateOf(false)
+        var version by mutableStateOf(0)
+    }
+
+    val tabsState = remember { androidx.compose.runtime.mutableStateListOf<ShellTab>() }
+    var cur by remember { mutableStateOf(0) }
+    var nextN by remember { mutableStateOf(1) }
+
+    fun newTab() {
+        if (!ready) return
+        val s = ShellSession(ctx)
+        val tab = ShellTab(s, nextN)
+        nextN++
+        tabsState.add(tab)
+        cur = tabsState.lastIndex
+        s.start(
+            onChange = {
+                tab.mode = s.mode
+                tab.title = s.screen.title.ifBlank { tab.title }
+                if (!s.running) tab.dead = true
+            },
+            onExit = { tab.dead = true }
+        )
+    }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // start once, and again whenever the user asks for a fresh shell
     LaunchedEffect(ready, tick) {
         if (!ready) return@LaunchedEffect
-        val s = ShellSession(ctx)
-        session = s
-        s.start(
-            onChange = {
-                mode = s.mode
-                title = s.screen.title
-                if (!s.running) dead = true
-            },
-            onExit = { dead = true }
-        )
+        if (tabsState.isEmpty()) newTab() else delay(120)
         delay(120)
-        mode = s.mode
+        tabsState.getOrNull(cur)?.let { it.mode = it.s.mode }
     }
-    DisposableEffect(Unit) { onDispose { session?.close() } }
 
-    // repaint whenever the emulator's version counter moves
-    var version by remember { mutableStateOf(0) }
-    LaunchedEffect(session, tick) {
+    DisposableEffect(Unit) { onDispose { tabsState.forEach { runCatching { it.s.close() } } } }
+
+    val tab = tabsState.getOrNull(cur)
+    val session = tab?.s
+    val mode = tab?.mode ?: "starting"
+    val title = tab?.title ?: "shell"
+    val dead = tab?.dead ?: false
+
+    // repaint whenever any tab's emulator moves
+    LaunchedEffect(tabsState.size, tick) {
         while (true) {
-            val v = session?.version?.get() ?: 0
-            if (v != version) version = v
+            tabsState.forEach { t ->
+                val v = t.s.version.get()
+                if (v != t.version) t.version = v
+            }
             delay(70)
         }
     }
 
+    val version = tab?.version ?: 0
     val lines = remember(version, fontSize) { session?.screen?.lines() ?: emptyList() }
     var autoScroll by remember { mutableStateOf(true) }
     LaunchedEffect(lines.size, version) {
@@ -170,8 +196,8 @@ fun TerminalScreen(ready: Boolean) {
             TermAction(if (autoScroll) "follow on" else "follow off",
                 if (autoScroll) Pal.mint else Pal.faint) { autoScroll = !autoScroll }
             Spacer(Modifier.weight(1f))
-            TermAction(if (dead) "restart" else "restart", Pal.cyan) {
-                session?.close(); dead = false; tick++
+            TermAction("restart", Pal.cyan) {
+                tab?.let { t -> runCatching { t.s.close() }; tabsState.remove(t); tick++ }
             }
         }
 
@@ -190,6 +216,48 @@ fun TerminalScreen(ready: Boolean) {
                 )
             }
             return@Column
+        }
+
+        // tab strip — one tab per live shell, exactly like a terminal in an IDE
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                .padding(horizontal = 9.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            tabsState.forEachIndexed { i, t ->
+                val on = i == cur
+                Pressable(onClick = { cur = i }, scaleDown = 0.95f) {
+                    Row(
+                        Modifier.clip(RoundedCornerShape(7.dp))
+                            .background(if (on) Pal.surface3 else Pal.surface)
+                            .border(1.dp,
+                                if (on) Pal.violet.copy(alpha = 0.45f) else Pal.line,
+                                RoundedCornerShape(7.dp))
+                            .padding(start = 9.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.size(5.dp).clip(RoundedCornerShape(50))
+                            .background(if (t.dead) Pal.rose else Pal.mint))
+                        Spacer(Modifier.width(6.dp))
+                        Text(t.title.take(18), color = if (on) Pal.text else Pal.dim,
+                            fontSize = 9.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+                        Spacer(Modifier.width(6.dp))
+                        Text("×", color = Pal.faint, fontSize = 11.sp,
+                            modifier = Modifier.clickable {
+                                runCatching { t.s.close() }
+                                tabsState.remove(t)
+                                cur = cur.coerceIn(0, (tabsState.size - 1).coerceAtLeast(0))
+                            })
+                    }
+                }
+            }
+            Pressable(onClick = { newTab() }, scaleDown = 0.9f) {
+                Box(
+                    Modifier.size(24.dp).clip(RoundedCornerShape(7.dp)).background(Pal.violetSoft),
+                    contentAlignment = Alignment.Center
+                ) { Text("＋", color = Pal.violet, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+            }
         }
 
         // --------------------------------------------------------------- grid

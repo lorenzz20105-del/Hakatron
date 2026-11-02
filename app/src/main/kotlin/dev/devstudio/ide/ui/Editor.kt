@@ -2,6 +2,7 @@ package dev.devstudio.ide.ui
 
 import android.util.Base64
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -467,8 +468,35 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             }
         }
 
+        // breadcrumbs — the VS Code habit: always know where the caret lives
+        val pathShown = active
+        if (pathShown != null) Breadcrumbs(pathShown, compact = wrap)
+
         // ------------------------------------------------------------- editor
         Box(Modifier.weight(1f).fillMaxWidth().background(EditorSurface)) {
+            // the activity rail sits on the leading edge, the minimap on the trailing
+            if (active != null && !bigFile && !wrap) {
+                Minimap(
+                    lines = lines,
+                    scroll = vs.value,
+                    viewportPx = screenPx,
+                    lineHeight = lineHeight,
+                    modifier = Modifier.align(Alignment.TopEnd)
+                )
+            }
+            if (active != null) {
+                ActivityRail(
+                    onFiles = { showFiles = !showFiles; refresh() },
+                    onSearch = { showSearch = true },
+                    onGit = { showGit = true },
+                    onProblems = { panelTab = 0 },
+                    onOutput = { panelTab = 1 },
+                    onRun = { save(andRun = true) },
+                    filesOpen = showFiles,
+                    panelTab = panelTab,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                )
+            }
             if (active == null) {
                 Column(
                     Modifier.fillMaxSize().padding(22.dp),
@@ -502,7 +530,8 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             } else {
                 val hs = rememberScrollState()
                 val caretLine = doc.text.take(doc.selection.start).count { it == '\n' }
-                Column(Modifier.fillMaxSize().verticalScroll(vs)) {
+                Column(Modifier.fillMaxSize().padding(start = 38.dp, end = 26.dp)
+                    .verticalScroll(vs)) {
                     Row(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 60.dp)) {
                         // numbers only make sense when one line is one row: with wrap on the
                         // status bar carries Ln/Col instead of a drifting gutter
@@ -703,14 +732,27 @@ fun EditorScreen(onPreview: (String) -> Unit = {}, initialPath: String? = null) 
             val caret = doc.selection.end
             val line = doc.text.take(caret).count { it == '\n' } + 1
             val col = caret - doc.text.take(caret).lastIndexOf('\n')
-            StatusPill(Highlighter.langOf(active ?: "").ifBlank { "text" }.uppercase(), Pal.violet)
+            StatusPill(Highlighter.langOf(active ?: "").ifBlank { "text" }, Pal.violet)
             Spacer(Modifier.width(6.dp))
-            Text("Ln $line:$col", color = Pal.dim, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            Text("Ln $line, Col $col", color = Pal.dim, fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace)
+            Spacer(Modifier.width(8.dp))
+            Text("Spaces: 4", color = Pal.faint, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            Spacer(Modifier.width(8.dp))
+            Text("UTF-8 · LF", color = Pal.faint, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
             Spacer(Modifier.weight(1f))
             if (bigFile) {
                 StatusPill("large · highlight off", Pal.amber)
                 Spacer(Modifier.width(6.dp))
             }
+            val problems = diagnostics.size
+            Row(Modifier.clickable { panelTab = 0 }, verticalAlignment = Alignment.CenterVertically) {
+                Text("⚠", color = if (problems > 0) Pal.rose else Pal.faint, fontSize = 9.sp)
+                Spacer(Modifier.width(3.dp))
+                Text("$problems", color = if (problems > 0) Pal.rose else Pal.faint,
+                    fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            }
+            Spacer(Modifier.width(8.dp))
             Text("${lines.size} lines", color = Pal.faint, fontSize = 9.sp)
             Spacer(Modifier.width(8.dp))
             Text("${doc.text.length} chars", color = Pal.faint, fontSize = 9.sp)
@@ -852,6 +894,136 @@ private fun swap(l: MutableList<String>, a: Int, b: Int) {
 }
 
 /** One square action on the editor header. */
+/**
+ * The activity rail — the thing that makes an editor read as an IDE at a glance.
+ * Six destinations, no labels, one accent for the thing that is open.
+ */
+@Composable
+private fun ActivityRail(
+    onFiles: () -> Unit,
+    onSearch: () -> Unit,
+    onGit: () -> Unit,
+    onProblems: () -> Unit,
+    onOutput: () -> Unit,
+    onRun: () -> Unit,
+    filesOpen: Boolean,
+    panelTab: Int,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier.width(34.dp).fillMaxHeight().background(Pal.ink)
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        RailItem("▤", "Explorer", filesOpen, Pal.cyan, onFiles)
+        RailItem("⌕", "Search", false, Pal.violet, onSearch)
+        RailItem("⑂", "Source control", false, Pal.amber, onGit)
+        RailItem("▷", "Run", false, Pal.mint, onRun)
+        Spacer(Modifier.height(6.dp))
+        Box(Modifier.width(18.dp).height(1.dp).background(Pal.lineSoft))
+        Spacer(Modifier.height(6.dp))
+        RailItem("⚠", "Problems", panelTab == 0, Pal.rose, onProblems)
+        RailItem("❯", "Output", panelTab == 1, Pal.dim, onOutput)
+    }
+}
+
+@Composable
+private fun RailItem(glyph: String, label: String, on: Boolean, tone: Color, onClick: () -> Unit) {
+    Pressable(onClick = onClick, scaleDown = 0.9f) {
+        Box(
+            Modifier.size(30.dp).clip(RoundedCornerShape(9.dp))
+                .background(if (on) tone.copy(alpha = 0.14f) else Color.Transparent),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(glyph, color = if (on) tone else Pal.faint, fontSize = 13.sp,
+                fontWeight = if (on) FontWeight.Black else FontWeight.Normal)
+        }
+    }
+}
+
+/**
+ * Breadcrumbs — folder segments, then the file. Tapping a segment is not wired to
+ * a picker yet, so the segments are text, not fake buttons.
+ */
+@Composable
+private fun Breadcrumbs(path: String, compact: Boolean) {
+    val parts = path.trimStart('/', '~').split('/').filter { it.isNotBlank() }
+    Row(
+        Modifier.fillMaxWidth().background(Pal.surface)
+            .padding(start = 12.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        parts.forEachIndexed { i, segment ->
+            val last = i == parts.lastIndex
+            Text(
+                segment,
+                color = if (last) Pal.text else Pal.faint,
+                fontSize = if (compact) 8.5.sp else 9.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = if (last) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1
+            )
+            if (!last) {
+                Text(" › ", color = Pal.faint, fontSize = 9.sp)
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        if (!compact) Text("${parts.size - 1} folder(s) deep", color = Pal.faint, fontSize = 8.sp)
+    }
+}
+
+/**
+ * A minimap, drawn from the text itself: one mark per non-blank line, wide marks
+ * where a line is long. The viewport box tracks the real scroll, so it is a map,
+ * not decoration.
+ */
+@Composable
+private fun Minimap(
+    lines: List<String>,
+    scroll: Int,
+    viewportPx: Float,
+    lineHeight: Float,
+    modifier: Modifier = Modifier
+) {
+    val total = lines.size.coerceAtLeast(1)
+    Canvas(modifier.width(22.dp).fillMaxHeight().background(Pal.ink.copy(alpha = 0.6f))) {
+        val h = size.height
+        val w = size.width
+        val step = h / total
+        val mark = step.coerceAtLeast(1f)
+        lines.forEachIndexed { i, line ->
+            if (i >= total) return@forEachIndexed
+            val t = line.trim()
+            if (t.isEmpty()) return@forEachIndexed
+            val x0 = 2.dp.toPx()
+            val len = (t.length / 70f).coerceIn(0.08f, 1f)
+            drawRect(
+                color = when {
+                    t.startsWith("//") || t.startsWith("#") || t.startsWith("/*") ->
+                        Pal.faint.copy(alpha = 0.5f)
+                    t.contains("fun ") || t.contains("class ") || t.contains("def ") ||
+                        t.contains("fn ") || t.contains("func ") -> Pal.violet.copy(alpha = 0.75f)
+                    else -> Pal.dim.copy(alpha = 0.45f)
+                },
+                topLeft = androidx.compose.ui.geometry.Offset(x0, i * step),
+                size = androidx.compose.ui.geometry.Size((w - x0 - 2.dp.toPx()) * len, mark)
+            )
+        }
+        // viewport
+        val top = (scroll / lineHeight) * step
+        val vh = (viewportPx / lineHeight) * step
+        drawRect(
+            color = Pal.text.copy(alpha = 0.08f),
+            topLeft = androidx.compose.ui.geometry.Offset(0f, top.coerceIn(0f, h)),
+            size = androidx.compose.ui.geometry.Size(w, vh.coerceAtMost(h))
+        )
+        drawLine(Pal.violet.copy(alpha = 0.5f),
+            androidx.compose.ui.geometry.Offset(0f, top.coerceIn(0f, h)),
+            androidx.compose.ui.geometry.Offset(w, top.coerceIn(0f, h)), strokeWidth = 1f)
+    }
+}
+
 @Composable
 private fun EditorPill(label: String, tone: Color, onClick: () -> Unit) {
     Pressable(onClick = onClick, scaleDown = 0.9f) {
